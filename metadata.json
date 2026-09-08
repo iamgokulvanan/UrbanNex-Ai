@@ -1,0 +1,6 @@
+{
+  "name": "UrbanNex AI",
+  "description": "Turning Every Bus into a Mobile Urban Sensor - Real-Time AI Fleet Intelligence & Smart City Infrastructure Command Center for SIH 2026",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
