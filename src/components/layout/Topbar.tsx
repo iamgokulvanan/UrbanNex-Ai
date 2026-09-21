@@ -63,7 +63,7 @@ export const Topbar: React.FC<TopbarProps> = ({
   const unreadCount = notifications.filter(n => !n.read).length;
 
   return (
-    <header className="sticky top-0 z-30 flex h-16 min-w-0 items-center justify-between overflow-hidden border-b border-slate-200 bg-white px-3 shadow-xs sm:px-4 md:px-6">
+    <header className="sticky top-0 z-30 flex h-16 min-w-0 items-center justify-between border-b border-slate-200 bg-white px-3 shadow-xs sm:px-4 md:px-6">
       {/* Brand & Live Indicator */}
       <div className="flex min-w-0 items-center gap-3 md:gap-4">
         <div className="flex items-center gap-2.5">

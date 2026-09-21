@@ -12,6 +12,7 @@ import {
 import { INITIAL_BUSES, INITIAL_DETECTIONS, INITIAL_ROUTES } from '../data/seedData';
 
 export function useUrbanNexRealtime() {
+  const demoMode = typeof window !== 'undefined' && localStorage.getItem('urbannex-token')?.startsWith('urbannex-demo:');
   const [buses, setBuses] = useState<Bus[]>(INITIAL_BUSES);
   const [detections, setDetections] = useState<Detection[]>(INITIAL_DETECTIONS);
   const [routes, setRoutes] = useState<RouteData[]>(INITIAL_ROUTES);
@@ -172,7 +173,7 @@ export function useUrbanNexRealtime() {
       console.error('[UrbanNex Client] WebSocket init failed:', e);
       reconnectTimeoutRef.current = setTimeout(connectWebSocket, 4000);
     }
-  }, []);
+  }, [demoMode]);
 
   useEffect(() => {
     connectWebSocket();
@@ -196,6 +197,20 @@ export function useUrbanNexRealtime() {
 
   // Send WS or REST commands
   const sendCommand = useCallback((cmd: any) => {
+    if (demoMode) {
+      if (cmd.action === 'pause' || cmd.action === 'resume') {
+        setSimulation(prev => ({ ...prev, isRunning: cmd.action === 'resume' }));
+      } else if (cmd.action === 'set_speed') {
+        setSimulation(prev => ({ ...prev, speed: cmd.speed }));
+      } else if (cmd.action === 'reset_demo') {
+        setBuses(INITIAL_BUSES);
+        setDetections(INITIAL_DETECTIONS);
+        setSimulation(prev => ({ ...prev, isRunning: true, speed: 1, totalEventsGenerated: INITIAL_DETECTIONS.length }));
+      } else if (cmd.action === 'trigger_detection') {
+        setSimulation(prev => ({ ...prev, totalEventsGenerated: prev.totalEventsGenerated + 1, lastEventTime: new Date().toLocaleTimeString() }));
+      }
+      return;
+    }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(cmd));
     } else {
@@ -222,7 +237,7 @@ export function useUrbanNexRealtime() {
         }).catch(() => {});
       }
     }
-  }, []);
+  }, [demoMode]);
 
   const verifyDetection = useCallback((id: string) => {
     // Optimistic update

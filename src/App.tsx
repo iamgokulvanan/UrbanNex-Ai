@@ -165,6 +165,7 @@ export default function App() {
     setUser(null);
     setSessionToken(null);
     localStorage.removeItem('urbannex-token');
+    localStorage.removeItem(DEMO_USER_KEY);
   };
 
   const handleAuthFormSubmit = (event: React.FormEvent) => {
