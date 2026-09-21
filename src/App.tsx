@@ -180,6 +180,7 @@ export default function App() {
     timestamp: string;
     evidenceImage?: string;
   }) => {
+    if (sessionToken?.startsWith(DEMO_SESSION_PREFIX)) return;
     const response = await fetch('/api/detections/mobile', {
       method: 'POST',
       headers: {
@@ -236,7 +237,7 @@ export default function App() {
       />
 
       {/* Main Layout (Sidebar + Content Area) */}
-      <div className="flex flex-1 relative overflow-hidden">
+      <div className="relative flex min-w-0 flex-1 overflow-hidden">
         {/* Desktop Sidebar */}
         <div className="hidden md:block">
           <Sidebar
@@ -285,7 +286,7 @@ export default function App() {
         )}
 
         {/* Dynamic Center Stage Views */}
-        <main className="flex-1 overflow-y-auto min-h-[calc(100vh-4rem)] pb-16 md:pb-6">
+        <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pb-16 md:pb-6">
           {activeTab === 'overview' && (
             <OverviewDashboard
               buses={buses}

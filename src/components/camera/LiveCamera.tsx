@@ -161,7 +161,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onSubmitDetection, onOpe
   const isStarting = status === 'starting';
 
   return (
-    <section className="p-4 md:p-6 max-w-7xl mx-auto space-y-6">
+    <section className="mx-auto w-full max-w-7xl space-y-5 p-3 sm:p-4 md:space-y-6 md:p-6">
       <div>
         <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Prototype camera input</p>
         <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">Live Camera</h1>
@@ -171,19 +171,19 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onSubmitDetection, onOpe
       </div>
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.6fr)]">
-        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 shadow-sm">
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-            <div className="flex items-center gap-2 text-sm font-semibold text-white">
+        <div className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-3 sm:px-4">
+            <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-white">
               <Camera className="h-4 w-4 text-blue-300" />
-              Live camera preview
+              <span className="truncate">Live camera preview</span>
             </div>
-            <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${isActive ? 'text-emerald-300' : 'text-slate-400'}`}>
+            <span className={`inline-flex shrink-0 items-center gap-1.5 text-xs font-semibold ${isActive ? 'text-emerald-300' : 'text-slate-400'}`}>
               <span className={`h-2 w-2 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-slate-500'}`} />
               {isActive ? 'Camera active' : isStarting ? 'Connecting...' : 'Camera stopped'}
             </span>
           </div>
 
-          <div className="relative aspect-video min-h-[260px] bg-slate-900 sm:min-h-[380px]">
+          <div className="relative aspect-[4/3] w-full bg-slate-900 sm:aspect-video">
             <video
               ref={videoRef}
               className={`h-full w-full object-contain ${isActive ? 'block' : 'hidden'}`}
@@ -202,7 +202,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onSubmitDetection, onOpe
           </div>
         </div>
 
-        <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="min-w-0 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
           <div className="flex items-start gap-3">
             <div className="rounded-xl bg-blue-50 p-2 text-blue-600"><ShieldCheck className="h-5 w-5" /></div>
             <div>
@@ -213,8 +213,8 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onSubmitDetection, onOpe
 
           <div className="rounded-xl border border-slate-100 bg-slate-50 p-3 text-xs">
             <div className="flex items-center justify-between gap-3"><span className="text-slate-500">Status</span><strong className={isActive ? 'text-emerald-600' : 'text-slate-700'}>{isActive ? 'Active' : isStarting ? 'Starting' : 'Inactive'}</strong></div>
-            <div className="mt-2 flex items-center justify-between gap-3"><span className="text-slate-500">Camera preference</span><strong className="text-slate-700">Rear / environment</strong></div>
-            <div className="mt-2 flex items-center justify-between gap-3"><span className="text-slate-500">GPS</span><strong className={gpsStatus === 'active' ? 'text-emerald-600' : 'text-amber-600'}>{gpsStatus === 'active' ? 'Active' : gpsStatus === 'searching' ? 'Searching...' : gpsStatus === 'denied' ? 'Permission denied' : gpsStatus === 'unavailable' ? 'Unavailable' : 'Inactive'}</strong></div>
+            <div className="mt-2 flex items-start justify-between gap-3"><span className="text-slate-500">Camera preference</span><strong className="text-right text-slate-700">Rear / environment</strong></div>
+            <div className="mt-2 flex items-start justify-between gap-3"><span className="text-slate-500">GPS</span><strong className={`text-right ${gpsStatus === 'active' ? 'text-emerald-600' : 'text-amber-600'}`}>{gpsStatus === 'active' ? 'Active' : gpsStatus === 'searching' ? 'Searching...' : gpsStatus === 'denied' ? 'Permission denied' : gpsStatus === 'unavailable' ? 'Unavailable' : 'Inactive'}</strong></div>
           </div>
 
           {location && <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3 text-xs text-emerald-900"><div className="flex items-center gap-2 font-bold"><MapPin className="h-4 w-4" /> GPS Active</div><p className="mt-1 font-mono">{location.latitude.toFixed(6)}, {location.longitude.toFixed(6)}</p><p className="mt-1 text-emerald-700">Accuracy: {Math.round(location.accuracy)} m</p></div>}
