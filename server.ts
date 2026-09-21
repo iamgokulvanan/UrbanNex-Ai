@@ -1,6 +1,8 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import Database from 'better-sqlite3';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { 
@@ -14,7 +16,8 @@ import {
   Detection, 
   IncidentStatus, 
   Department, 
-  IncidentHistoryEntry 
+  IncidentHistoryEntry,
+  DetectionType,
 } from './src/types/index.ts';
 import { DemoInferenceService } from './src/services/aiInference.ts';
 
@@ -22,13 +25,68 @@ const app = express();
 const PORT = 3000;
 const server = http.createServer(app);
 
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
+
+const database = new Database(path.join(process.cwd(), 'urbannex.db'));
+database.pragma('journal_mode = WAL');
+database.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS mobile_detections (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+`);
+
+type AuthUser = { id: number; name: string; email: string };
+
+function hashPassword(password: string, salt = randomBytes(16).toString('hex')) {
+  return {
+    salt,
+    hash: scryptSync(password, salt, 64).toString('hex'),
+  };
+}
+
+function getUserByToken(token: string | undefined): AuthUser | null {
+  if (!token) return null;
+  const user = database.prepare(`
+    SELECT users.id, users.name, users.email
+    FROM sessions JOIN users ON users.id = sessions.user_id
+    WHERE sessions.token = ?
+  `).get(token) as AuthUser | undefined;
+  return user || null;
+}
+
+function getBearerToken(req: express.Request) {
+  const header = req.header('authorization');
+  return header?.startsWith('Bearer ') ? header.slice(7) : undefined;
+}
+
+function createSession(user: AuthUser) {
+  const token = randomBytes(32).toString('hex');
+  database.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)')
+    .run(token, user.id, new Date().toISOString());
+  return { token, user };
+}
 
 // In-memory persistent state for prototype demonstration
 let buses: Bus[] = JSON.parse(JSON.stringify(INITIAL_BUSES));
 let detections: Detection[] = JSON.parse(JSON.stringify(INITIAL_DETECTIONS));
 let simulationRunning = true;
-let simulationSpeedMultiplier: 1 | 2 | 5 = 1;
+let simulationSpeedMultiplier: 1 | 2 | 3 = 1;
 let detectionCounter = 129;
 
 const demoInference = new DemoInferenceService();
@@ -95,7 +153,7 @@ function handleClientCommand(msg: { action: string; [key: string]: any }, sender
       broadcast('simulation:updated', { isRunning: true, speed: simulationSpeedMultiplier });
       break;
     case 'set_speed':
-      if ([1, 2, 5].includes(msg.speed)) {
+      if ([1, 2, 3].includes(msg.speed)) {
         simulationSpeedMultiplier = msg.speed;
         broadcast('simulation:updated', { isRunning: simulationRunning, speed: simulationSpeedMultiplier });
       }
@@ -364,6 +422,59 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
+// Authentication is backed by SQLite so accounts survive browser refreshes and server restarts.
+app.post('/api/auth/signup', (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const password = String(req.body.password || '');
+  if (!name || !email || password.length < 6) {
+    return res.status(400).json({ error: 'Name, email, and a password of at least 6 characters are required.' });
+  }
+
+  const credentials = hashPassword(password);
+  try {
+    const result = database.prepare(`
+      INSERT INTO users (name, email, password_hash, password_salt, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(name, email, credentials.hash, credentials.salt, new Date().toISOString());
+    const user = { id: Number(result.lastInsertRowid), name, email };
+    return res.status(201).json(createSession(user));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+      return res.status(409).json({ error: 'An account with this email already exists.' });
+    }
+    return res.status(500).json({ error: 'Unable to create the account.' });
+  }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const password = String(req.body.password || '');
+  const record = database.prepare('SELECT id, name, email, password_hash, password_salt FROM users WHERE email = ?')
+    .get(email) as { id: number; name: string; email: string; password_hash: string; password_salt: string } | undefined;
+  if (!record) return res.status(401).json({ error: 'Invalid email or password.' });
+
+  const suppliedHash = Buffer.from(hashPassword(password, record.password_salt).hash, 'hex');
+  const storedHash = Buffer.from(record.password_hash, 'hex');
+  if (suppliedHash.length !== storedHash.length || !timingSafeEqual(suppliedHash, storedHash)) {
+    return res.status(401).json({ error: 'Invalid email or password.' });
+  }
+
+  return res.json(createSession({ id: record.id, name: record.name, email: record.email }));
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const user = getUserByToken(getBearerToken(req));
+  if (!user) return res.status(401).json({ error: 'Session expired.' });
+  return res.json({ user });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const token = getBearerToken(req);
+  if (token) database.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  return res.status(204).send();
+});
+
 // Buses
 app.get('/api/buses', (req, res) => {
   res.json({ buses, count: buses.length });
@@ -376,6 +487,75 @@ app.get('/api/buses/:id', (req, res) => {
 });
 
 // Detections
+app.post('/api/detections/mobile', async (req, res) => {
+  const user = getUserByToken(getBearerToken(req));
+  if (!user) return res.status(401).json({ error: 'Please sign in before submitting a camera capture.' });
+
+  const detectionType = req.body.detectionType as DetectionType;
+  const latitude = Number(req.body.latitude);
+  const longitude = Number(req.body.longitude);
+  const allowedTypes: DetectionType[] = ['pothole', 'road_damage', 'waterlogging', 'congestion', 'pedestrian_risk'];
+  if (!allowedTypes.includes(detectionType) || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return res.status(400).json({ error: 'A valid issue type and GPS coordinates are required.' });
+  }
+
+  const timestamp = String(req.body.timestamp || new Date().toISOString());
+  const result = await demoInference.detect({
+    busId: 'MOBILE-CAMERA',
+    routeId: 'MOBILE-01',
+    latitude,
+    longitude,
+    speed: 0,
+    timestamp,
+  });
+  const confidence = result.confidence || 0.9;
+  const detectionId = `MOB-${new Date().getUTCFullYear()}-${++detectionCounter}`;
+  const detection: Detection = {
+    id: detectionId,
+    type: detectionType,
+    confidence,
+    severity: demoInference.calculate_severity(detectionType, confidence, result.roadSurfaceMetric),
+    latitude,
+    longitude,
+    locationName: `Mobile GPS capture (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`,
+    busId: 'MOBILE-CAMERA',
+    routeId: 'MOBILE-01',
+    timestamp,
+    status: 'pending_verification',
+    evidenceImage: String(req.body.evidenceImage || result.evidenceKey || 'mobile-camera-frame'),
+    source: 'mobile_camera',
+    gpsAccuracy: Number(req.body.gpsAccuracy) || undefined,
+    simulatedBoundingBoxes: result.boundingBoxes,
+    roadSurfaceMetric: result.roadSurfaceMetric,
+    notes: `${result.notes || 'Mobile camera evidence captured.'} Frame analyzed by the UrbanNex edge inference service.`,
+    history: [{
+      id: `H-${Date.now()}`,
+      detectionId,
+      previousStatus: 'pending_verification',
+      newStatus: 'pending_verification',
+      timestamp: new Date().toISOString(),
+      changedBy: `Mobile Camera (${user.name})`,
+      note: 'Evidence captured with browser camera and device GPS.',
+    }],
+  };
+
+  detections = [detection, ...detections.slice(0, 49)];
+  database.prepare('INSERT INTO mobile_detections (id, user_id, payload, created_at) VALUES (?, ?, ?, ?)')
+    .run(detection.id, user.id, JSON.stringify(detection), new Date().toISOString());
+  broadcast('detection:new', {
+    detection,
+    notification: {
+      id: `NOTIF-${Date.now()}`,
+      title: `Mobile ${detectionType.replace('_', ' ').toUpperCase()} Captured`,
+      message: `${user.name} submitted a camera capture at ${detection.locationName}.`,
+      type: detection.severity === 'critical' ? 'critical' : 'warning',
+      timestamp: new Date().toISOString(),
+      relatedDetectionId: detection.id,
+    },
+  });
+  return res.status(201).json({ detection });
+});
+
 app.get('/api/detections', (req, res) => {
   const { type, severity, status, bus_id } = req.query;
   let filtered = [...detections];
@@ -517,7 +697,7 @@ app.post('/api/simulation/control', async (req, res) => {
     broadcast('simulation:updated', { isRunning: true, speed: simulationSpeedMultiplier });
     return res.json({ status: 'resumed' });
   } else if (action === 'set_speed') {
-    if ([1, 2, 5].includes(speed)) {
+    if ([1, 2, 3].includes(speed)) {
       simulationSpeedMultiplier = speed;
       broadcast('simulation:updated', { isRunning: simulationRunning, speed: simulationSpeedMultiplier });
       return res.json({ status: 'speed_updated', speed });

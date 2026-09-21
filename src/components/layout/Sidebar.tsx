@@ -11,11 +11,13 @@ import {
   HeartPulse, 
   ShieldCheck,
   Zap,
-  Info
+  Info,
+  Camera
 } from 'lucide-react';
 
 export type NavTab = 
   | 'overview'
+  | 'live_camera'
   | 'gis_map'
   | 'detections'
   | 'fleet'
@@ -47,6 +49,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Overview',
       icon: LayoutDashboard,
       badge: null,
+    },
+    {
+      id: 'live_camera' as NavTab,
+      label: 'Live Camera',
+      icon: Camera,
+      badge: 'Mobile',
+      badgeColor: 'bg-blue-100 text-blue-700',
     },
     {
       id: 'gis_map' as NavTab,

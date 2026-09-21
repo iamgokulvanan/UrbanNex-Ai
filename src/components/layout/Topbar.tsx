@@ -10,6 +10,9 @@ import {
   ChevronDown, 
   ShieldCheck, 
   ExternalLink,
+  LogIn,
+  LogOut,
+  UserPlus,
   Bus as BusIcon,
   CheckCircle2,
   AlertTriangle,
@@ -23,12 +26,17 @@ interface TopbarProps {
   notifications: NotificationItem[];
   onPause: () => void;
   onResume: () => void;
-  onSetSpeed: (speed: 1 | 2 | 5) => void;
+  onSetSpeed: (speed: 1 | 2 | 3) => void;
   onTriggerDetection: () => void;
   onResetDemo: () => void;
   onSelectNotification?: (detectionId?: string) => void;
   searchQuery: string;
   onSearchChange: (q: string) => void;
+  searchResults: Array<{ id: string; label: string; detail: string; kind: 'bus' | 'detection' }>;
+  onSelectSearchResult: (result: { id: string; kind: 'bus' | 'detection' }) => void;
+  user: { name: string; email: string } | null;
+  onOpenAuth: (mode: 'login' | 'signup') => void;
+  onLogout: () => void;
 }
 
 export const Topbar: React.FC<TopbarProps> = ({
@@ -43,6 +51,11 @@ export const Topbar: React.FC<TopbarProps> = ({
   onSelectNotification,
   searchQuery,
   onSearchChange,
+  searchResults,
+  onSelectSearchResult,
+  user,
+  onOpenAuth,
+  onLogout,
 }) => {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
@@ -104,7 +117,7 @@ export const Topbar: React.FC<TopbarProps> = ({
 
           {/* Speed Selector */}
           <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-xs font-semibold text-slate-600">
-            {([1, 2, 5] as const).map((spd) => (
+            {([1, 2, 3] as const).map((spd) => (
               <button
                 key={spd}
                 onClick={() => onSetSpeed(spd)}
@@ -149,6 +162,22 @@ export const Topbar: React.FC<TopbarProps> = ({
             onChange={(e) => onSearchChange(e.target.value)}
             className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 hover:bg-slate-100/70 focus:bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-slate-800"
           />
+          {searchQuery.trim() && (
+            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-xl z-50 overflow-hidden">
+              {searchResults.length === 0 ? (
+                <p className="px-3 py-3 text-xs text-slate-500">No buses or incidents found.</p>
+              ) : searchResults.map((result) => (
+                <button
+                  key={`${result.kind}-${result.id}`}
+                  onClick={() => onSelectSearchResult(result)}
+                  className="w-full text-left px-3 py-2.5 hover:bg-blue-50 border-b border-slate-100 last:border-0"
+                >
+                  <p className="text-xs font-semibold text-slate-800">{result.label}</p>
+                  <p className="text-[10px] text-slate-500 truncate">{result.detail}</p>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Notifications */}
@@ -238,28 +267,34 @@ export const Topbar: React.FC<TopbarProps> = ({
             className="flex items-center gap-2 pl-2 pr-1.5 py-1 rounded-xl hover:bg-slate-100 border border-slate-200 transition-colors"
           >
             <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center text-xs font-bold shadow-xs">
-              CA
+              {user ? user.name.slice(0, 2).toUpperCase() : <LogIn className="w-3.5 h-3.5" />}
             </div>
             <div className="hidden lg:block text-left">
-              <p className="text-xs font-semibold text-slate-800 leading-tight">Command Authority</p>
-              <p className="text-[10px] text-slate-500 leading-tight">authority@urbannex.ai</p>
+              <p className="text-xs font-semibold text-slate-800 leading-tight">{user?.name || 'Guest Authority'}</p>
+              <p className="text-[10px] text-slate-500 leading-tight">{user?.email || 'Sign in to continue'}</p>
             </div>
             <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
           </button>
 
           {showProfileMenu && (
             <div className="absolute right-0 mt-2 w-64 bg-white rounded-2xl shadow-xl border border-slate-200 p-3 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+              {!user ? (
+                <div className="space-y-2">
+                  <button onClick={() => onOpenAuth('login')} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"><LogIn className="w-3.5 h-3.5" /> Log in</button>
+                  <button onClick={() => onOpenAuth('signup')} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 text-slate-700 text-xs font-semibold hover:bg-slate-50"><UserPlus className="w-3.5 h-3.5" /> Sign up</button>
+                </div>
+              ) : <>
               <div className="pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-blue-600" />
                   <span className="text-xs font-bold text-slate-800">Smart City Authority Portal</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Connected as: <span className="font-medium text-slate-700">authority@urbannex.ai</span>
+                  Connected as: <span className="font-medium text-slate-700">{user.email}</span>
                 </p>
                 <div className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[10px] font-semibold border border-emerald-200">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                  Role: Municipal Commissioner Desk
+                  {user.name} · Municipal Commissioner Desk
                 </div>
               </div>
               <div className="pt-2 text-xs text-slate-600 space-y-1.5">
@@ -272,6 +307,8 @@ export const Topbar: React.FC<TopbarProps> = ({
                   <span className="font-semibold text-blue-600">Active</span>
                 </div>
               </div>
+              <button onClick={onLogout} className="mt-3 w-full flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-semibold text-red-600 hover:bg-red-50"><LogOut className="w-3.5 h-3.5" /> Log out</button>
+              </>}
             </div>
           )}
         </div>

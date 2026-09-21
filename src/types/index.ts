@@ -37,6 +37,8 @@ export interface Detection {
   department?: Department;
   assignedTo?: string;
   evidenceImage: string; // Simulated frame SVG/canvas URL or key
+  source?: 'fleet_camera' | 'mobile_camera';
+  gpsAccuracy?: number;
   simulatedBoundingBoxes?: BoundingBox[];
   roadSurfaceMetric?: string;
   speedAtDetection?: number;
@@ -122,7 +124,7 @@ export interface NotificationItem {
 
 export interface SimulationControlState {
   isRunning: boolean;
-  speed: 1 | 2 | 5;
+  speed: 1 | 2 | 3;
   activeBusCount: number;
   totalEventsGenerated: number;
   lastEventTime?: string;

@@ -266,7 +266,7 @@ export function useUrbanNexRealtime() {
     sendCommand({ action: 'resume' });
   }, [sendCommand]);
 
-  const setSimulationSpeed = useCallback((speed: 1 | 2 | 5) => {
+  const setSimulationSpeed = useCallback((speed: 1 | 2 | 3) => {
     sendCommand({ action: 'set_speed', speed });
   }, [sendCommand]);
 
@@ -276,6 +276,17 @@ export function useUrbanNexRealtime() {
 
   const resetSimulation = useCallback(() => {
     sendCommand({ action: 'reset_demo' });
+  }, [sendCommand]);
+
+  const submitMobileDetection = useCallback((payload: {
+    detectionType: Detection['type'];
+    latitude: number;
+    longitude: number;
+    gpsAccuracy?: number;
+    timestamp: string;
+    evidenceImage?: string;
+  }) => {
+    sendCommand({ action: 'mobile_detection', ...payload });
   }, [sendCommand]);
 
   const markNotificationRead = useCallback((id: string) => {
@@ -307,6 +318,7 @@ export function useUrbanNexRealtime() {
     resumeSimulation,
     setSimulationSpeed,
     triggerManualDetection,
+    submitMobileDetection,
     resetSimulation,
     markNotificationRead,
     clearAllNotifications,

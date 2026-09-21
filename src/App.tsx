@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useUrbanNexRealtime } from './hooks/useUrbanNexRealtime';
 import { Topbar } from './components/layout/Topbar';
 import { Sidebar, NavTab } from './components/layout/Sidebar';
@@ -12,12 +12,15 @@ import { IncidentsPage } from './components/incidents/IncidentsPage';
 import { AnalyticsPage } from './components/analytics/AnalyticsPage';
 import { SystemHealthPage } from './components/health/SystemHealthPage';
 import { PrivacySpecsPage } from './components/privacy/PrivacySpecsPage';
+import { LiveCamera } from './components/camera/LiveCamera';
 import { DetectionDrawer } from './components/detections/DetectionDrawer';
-import { Detection, Bus, Department } from './types';
+import { LoginPage } from './components/auth/LoginPage';
+import { Detection, Bus, Department, DetectionType } from './types';
 import { 
   LayoutDashboard, 
   MapPin, 
   Activity, 
+  Camera,
   Bus as BusIcon, 
   Kanban, 
   Menu, 
@@ -52,6 +55,29 @@ export default function App() {
   const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+  const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('urbannex-token'));
+  const [authMode, setAuthMode] = useState<'login' | 'signup' | null>(null);
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Your session has expired. Please sign in again.');
+        const data = await response.json();
+        setUser(data.user);
+      })
+      .catch(() => {
+        localStorage.removeItem('urbannex-token');
+        setSessionToken(null);
+        setUser(null);
+      });
+  }, [sessionToken]);
 
   // Handlers
   const handleSelectDetectionById = (id?: string) => {
@@ -69,6 +95,85 @@ export default function App() {
 
   const pendingCount = detections.filter(d => d.status === 'pending_verification').length;
   const criticalCount = detections.filter(d => d.severity === 'critical' && d.status !== 'resolved').length;
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const searchResults = normalizedSearch ? [
+    ...buses
+      .filter(bus => [bus.id, bus.busNumber, bus.routeName, bus.driverName].some(value => value.toLowerCase().includes(normalizedSearch)))
+      .slice(0, 5)
+      .map(bus => ({ id: bus.id, label: bus.id, detail: `${bus.routeName} · ${bus.driverName}`, kind: 'bus' as const })),
+    ...detections
+      .filter(detection => [detection.id, detection.locationName, detection.busId, detection.type].some(value => value.toLowerCase().includes(normalizedSearch)))
+      .slice(0, 5)
+      .map(detection => ({ id: detection.id, label: detection.id, detail: `${detection.type.replace('_', ' ')} · ${detection.locationName}`, kind: 'detection' as const })),
+  ].slice(0, 8) : [];
+
+  const handleAuthSubmit = async ({ name, email, password }: { name: string; email: string; password: string }) => {
+    setAuthSubmitting(true);
+    setAuthError('');
+    try {
+      const response = await fetch(`/api/auth/${authMode === 'signup' ? 'signup' : 'login'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), email: email.trim(), password }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to authenticate.');
+      localStorage.setItem('urbannex-token', data.token);
+      setSessionToken(data.token);
+      setUser(data.user);
+      setAuthMode(null);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Unable to authenticate.');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleLogout = () => {
+    if (sessionToken) {
+      fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${sessionToken}` } }).catch(() => {});
+    }
+    setUser(null);
+    setSessionToken(null);
+    localStorage.removeItem('urbannex-token');
+  };
+
+  const handleAuthFormSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    void handleAuthSubmit({ name: authName, email: authEmail, password: authPassword });
+  };
+
+  const submitMobileDetection = async (payload: {
+    detectionType: DetectionType;
+    latitude: number;
+    longitude: number;
+    gpsAccuracy?: number;
+    timestamp: string;
+    evidenceImage?: string;
+  }) => {
+    const response = await fetch('/api/detections/mobile', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Unable to submit this camera capture.');
+  };
+
+  if (!user) {
+    return (
+      <LoginPage
+        mode={authMode === 'signup' ? 'signup' : 'login'}
+        onModeChange={setAuthMode}
+        onSubmit={handleAuthSubmit}
+        errorMessage={authError}
+        isSubmitting={authSubmitting}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-50 text-slate-900 font-sans antialiased selection:bg-blue-100 selection:text-blue-900">
@@ -85,6 +190,20 @@ export default function App() {
         onSelectNotification={handleSelectDetectionById}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
+        searchResults={searchResults}
+        onSelectSearchResult={(result) => {
+          setSearchQuery('');
+          if (result.kind === 'bus') {
+            const bus = buses.find(item => item.id === result.id);
+            if (bus) handleOpenMapForBus(bus);
+          } else {
+            const detection = detections.find(item => item.id === result.id);
+            if (detection) setSelectedDetection(detection);
+          }
+        }}
+        user={user}
+        onOpenAuth={setAuthMode}
+        onLogout={handleLogout}
       />
 
       {/* Main Layout (Sidebar + Content Area) */}
@@ -150,6 +269,13 @@ export default function App() {
               onVerify={verifyDetection}
               onAssign={assignDepartment}
               onResolve={resolveIncident}
+            />
+          )}
+
+          {activeTab === 'live_camera' && (
+            <LiveCamera
+              onSubmitDetection={submitMobileDetection}
+              onOpenMap={() => setActiveTab('gis_map')}
             />
           )}
 
@@ -284,6 +410,16 @@ export default function App() {
         </button>
 
         <button
+          onClick={() => setActiveTab('live_camera')}
+          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
+            activeTab === 'live_camera' ? 'text-blue-600' : 'text-slate-500'
+          }`}
+        >
+          <Camera className="w-4 h-4" />
+          <span>Camera</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('detections')}
           className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
             activeTab === 'detections' ? 'text-blue-600' : 'text-slate-500'
@@ -342,6 +478,33 @@ export default function App() {
             setSelectedDetection(prev => prev ? { ...prev, status: 'resolved' } : null);
           }}
         />
+      )}
+
+      {authMode && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/40 p-4" onClick={() => setAuthMode(null)}>
+          <form onSubmit={handleAuthFormSubmit} onClick={(event) => event.stopPropagation()} className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
+            <div className="flex items-start justify-between mb-5">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">{authMode === 'login' ? 'Log in' : 'Create account'}</h2>
+                <p className="text-xs text-slate-500 mt-1">Access the UrbanNex command center.</p>
+              </div>
+              <button type="button" onClick={() => setAuthMode(null)} className="text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
+            </div>
+            {authMode === 'signup' && (
+              <label className="block mb-3 text-xs font-semibold text-slate-700">Full name
+                <input required value={authName} onChange={(event) => setAuthName(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+              </label>
+            )}
+            <label className="block mb-3 text-xs font-semibold text-slate-700">Email
+              <input required type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+            </label>
+            <label className="block mb-5 text-xs font-semibold text-slate-700">Password
+              <input required minLength={6} type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+            </label>
+            {authError && <p role="alert" className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{authError}</p>}
+            <button type="submit" className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">{authMode === 'login' ? 'Log in' : 'Sign up'}</button>
+          </form>
+        </div>
       )}
     </div>
   );
