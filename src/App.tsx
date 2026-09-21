@@ -31,6 +31,7 @@ import {
 
 const DEMO_SESSION_PREFIX = 'urbannex-demo:';
 const DEMO_USER_KEY = 'urbannex-demo-user';
+const DEMO_ACCOUNT_KEY = 'urbannex-demo-account';
 
 async function readApiResponse(response: Response) {
   const contentType = response.headers.get('content-type') || '';
@@ -128,11 +129,12 @@ export default function App() {
   const handleAuthSubmit = async ({ name, email, password }: { name: string; email: string; password: string }) => {
     setAuthSubmitting(true);
     setAuthError('');
+    const normalizedEmail = email.trim().toLowerCase();
     try {
       const response = await fetch(`/api/auth/${authMode === 'signup' ? 'signup' : 'login'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), email: email.trim(), password }),
+        body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password }),
       });
       const data = await readApiResponse(response);
       if (!response.ok) throw new Error(data.error || 'Unable to authenticate.');
@@ -143,7 +145,25 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to authenticate.';
       if (message.startsWith('The authentication service')) {
-        const demoUser = { name: name.trim() || 'Command Authority', email: email.trim() };
+        const storedAccount = localStorage.getItem(DEMO_ACCOUNT_KEY);
+        const account = storedAccount ? JSON.parse(storedAccount) as { name: string; email: string; password: string } : null;
+        if (authMode === 'signup') {
+          if (account && account.email === normalizedEmail) {
+            setAuthError('An account with this email already exists. Please log in.');
+            return;
+          }
+          localStorage.setItem(DEMO_ACCOUNT_KEY, JSON.stringify({
+            name: name.trim() || 'Command Authority',
+            email: normalizedEmail,
+            password,
+          }));
+        } else if (!account || account.email !== normalizedEmail || account.password !== password) {
+          setAuthError('Invalid email or password.');
+          return;
+        }
+        const demoUser = account && authMode === 'login'
+          ? { name: account.name, email: account.email }
+          : { name: name.trim() || 'Command Authority', email: normalizedEmail };
         const demoToken = `${DEMO_SESSION_PREFIX}${Date.now()}`;
         localStorage.setItem(DEMO_USER_KEY, JSON.stringify(demoUser));
         localStorage.setItem('urbannex-token', demoToken);
