@@ -21,7 +21,7 @@ import {
 } from './src/types/index.ts';
 import { DemoInferenceService } from './src/services/aiInference.ts';
 
-const app = express();
+export const app = express();
 const PORT = 3000;
 const server = http.createServer(app);
 
@@ -734,4 +734,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}

@@ -29,6 +29,16 @@ import {
   AlertOctagon
 } from 'lucide-react';
 
+async function readApiResponse(response: Response) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(response.ok
+      ? 'The authentication service returned an invalid response.'
+      : 'The authentication service is unavailable. Please try again shortly.');
+  }
+  return response.json();
+}
+
 export default function App() {
   const {
     buses,
@@ -69,7 +79,7 @@ export default function App() {
     fetch('/api/auth/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
       .then(async (response) => {
         if (!response.ok) throw new Error('Your session has expired. Please sign in again.');
-        const data = await response.json();
+        const data = await readApiResponse(response);
         setUser(data.user);
       })
       .catch(() => {
@@ -116,7 +126,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: name.trim(), email: email.trim(), password }),
       });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) throw new Error(data.error || 'Unable to authenticate.');
       localStorage.setItem('urbannex-token', data.token);
       setSessionToken(data.token);
