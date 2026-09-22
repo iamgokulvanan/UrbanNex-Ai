@@ -22,7 +22,8 @@ interface RealVideoDetectionProps {
 }
 
 const supportedExtensions = ['.mp4', '.mov', '.avi', '.mkv'];
-const backendUrl = (import.meta.env.VITE_BACKEND_URL || window.location.origin).replace(/\/$/, '');
+const backendUrl = (import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+const maxVideoBytes = 200 * 1024 * 1024;
 
 function formatTimestamp(seconds: number) {
   const minutes = Math.floor(seconds / 60);
@@ -54,6 +55,12 @@ export const RealVideoDetection: React.FC<RealVideoDetectionProps> = ({ onVideoA
       setError('Invalid file type. Please choose an MP4, MOV, AVI, or MKV video.');
       return;
     }
+    if (file.size > maxVideoBytes) {
+      setVideo(null);
+      setStatus('error');
+      setError('Video file is too large. Please choose a file smaller than 200 MB.');
+      return;
+    }
     setVideo(file);
     setStatus('idle');
   };
@@ -71,7 +78,7 @@ export const RealVideoDetection: React.FC<RealVideoDetectionProps> = ({ onVideoA
     try {
       const response = await fetch(`${backendUrl}/api/detections/video`, { method: 'POST', body: formData });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.detail || 'Video processing failed.');
+      if (!response.ok) throw new Error(data.detail || data.error || `Video processing failed (${response.status}).`);
       const videoResult = data as VideoResponse;
       setResult(videoResult);
       onVideoAnalyzed?.(videoResult.detections, videoResult.video_name);

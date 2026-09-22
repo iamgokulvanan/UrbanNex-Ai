@@ -426,7 +426,7 @@ setInterval(() => {
 
 // ==================== REST API ROUTES ====================
 
-function makeDetectionSvg(x1: number, y1: number, x2: number, y2: number, confidence: number, frame: number) {
+function makeDetectionSvg(x1: number, y1: number, x2: number, y2: number, confidence: number, frame: number, label: string) {
   const width = 640;
   const height = 360;
   const svg = `
@@ -442,7 +442,7 @@ function makeDetectionSvg(x1: number, y1: number, x2: number, y2: number, confid
       <path d="M0 220 L200 120 L440 120 L640 220" fill="#475569" opacity="0.7"/>
       <line x1="320" y1="120" x2="320" y2="220" stroke="#f8fafc" stroke-width="3" stroke-dasharray="18 15"/>
       <rect x="${x1}" y="${y1}" width="${Math.max(30, x2 - x1)}" height="${Math.max(26, y2 - y1)}" fill="rgba(239,68,68,0.12)" stroke="#dc2626" stroke-width="4"/>
-      <text x="${x1 + 8}" y="${Math.max(22, y1 - 8)}" fill="#dc2626" font-size="22" font-weight="700" font-family="Arial">pothole</text>
+      <text x="${x1 + 8}" y="${Math.max(22, y1 - 8)}" fill="#dc2626" font-size="22" font-weight="700" font-family="Arial">${label}</text>
       <text x="${x1 + 8}" y="${y2 + 32}" fill="#0f172a" font-size="18" font-family="Arial">conf ${(confidence * 100).toFixed(1)}%</text>
       <text x="18" y="28" fill="#0f172a" font-size="16" font-family="Arial">Frame ${frame}</text>
     </svg>
@@ -474,7 +474,7 @@ function buildSyntheticVideoAnalysis(fileName: string) {
   const detectionCount = 2 + Math.floor(Math.random() * 3);
   const detections = Array.from({ length: detectionCount }, (_, index) => {
     const normalizedIndex = index + 1;
-    const confidence = Number((0.82 + (normalizedIndex * 0.06) + Math.random() * 0.08).toFixed(3));
+    const confidence = Number(Math.min(0.99, 0.82 + (normalizedIndex * 0.06) + Math.random() * 0.08).toFixed(3));
     const x1 = 70 + index * 110 + Math.round(Math.random() * 30);
     const y1 = 120 + Math.round(Math.random() * 80);
     const x2 = x1 + 60 + Math.round(Math.random() * 50);
@@ -488,7 +488,7 @@ function buildSyntheticVideoAnalysis(fileName: string) {
       bbox: { x1, y1, x2, y2 },
       frame,
       timestamp: Number((frame / 24).toFixed(2)),
-      frame_image: makeDetectionSvg(x1, y1, x2, y2, confidence, frame),
+      frame_image: makeDetectionSvg(x1, y1, x2, y2, confidence, frame, issueType),
     };
   });
 
