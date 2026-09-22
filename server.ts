@@ -3,6 +3,7 @@ import http from 'http';
 import path from 'path';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import Database from 'better-sqlite3';
+import multer from 'multer';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { 
@@ -18,6 +19,7 @@ import {
   Department, 
   IncidentHistoryEntry,
   DetectionType,
+  SeverityLevel,
 } from './src/types/index.ts';
 import { DemoInferenceService } from './src/services/aiInference.ts';
 
@@ -26,6 +28,13 @@ const PORT = 3000;
 const server = http.createServer(app);
 
 app.use(express.json({ limit: '5mb' }));
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 200 * 1024 * 1024,
+  },
+});
 
 const database = new Database(path.join(process.cwd(), 'urbannex.db'));
 database.pragma('journal_mode = WAL');
@@ -416,6 +425,102 @@ setInterval(() => {
 }, 18000);
 
 // ==================== REST API ROUTES ====================
+
+function makeDetectionSvg(x1: number, y1: number, x2: number, y2: number, confidence: number, frame: number) {
+  const width = 640;
+  const height = 360;
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      <defs>
+        <linearGradient id="road" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="#0f172a"/>
+          <stop offset="100%" stop-color="#1e293b"/>
+        </linearGradient>
+      </defs>
+      <rect width="100%" height="100%" fill="#e2e8f0"/>
+      <rect x="0" y="220" width="640" height="140" fill="url(#road)"/>
+      <path d="M0 220 L200 120 L440 120 L640 220" fill="#475569" opacity="0.7"/>
+      <line x1="320" y1="120" x2="320" y2="220" stroke="#f8fafc" stroke-width="3" stroke-dasharray="18 15"/>
+      <rect x="${x1}" y="${y1}" width="${Math.max(30, x2 - x1)}" height="${Math.max(26, y2 - y1)}" fill="rgba(239,68,68,0.12)" stroke="#dc2626" stroke-width="4"/>
+      <text x="${x1 + 8}" y="${Math.max(22, y1 - 8)}" fill="#dc2626" font-size="22" font-weight="700" font-family="Arial">pothole</text>
+      <text x="${x1 + 8}" y="${y2 + 32}" fill="#0f172a" font-size="18" font-family="Arial">conf ${(confidence * 100).toFixed(1)}%</text>
+      <text x="18" y="28" fill="#0f172a" font-size="16" font-family="Arial">Frame ${frame}</text>
+    </svg>
+  `;
+
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function inferVideoIssueType(fileName: string): DetectionType {
+  const lower = fileName.toLowerCase();
+  if (/(water|flood|logging|drain|pond|storm)/.test(lower)) return 'waterlogging';
+  if (/(traffic|jam|congestion|queue|gridlock|vehicle)/.test(lower)) return 'congestion';
+  if (/(pedestrian|people|crosswalk|crowd|walking)/.test(lower)) return 'pedestrian_risk';
+  if (/(road|crack|damage|pavement|surface)/.test(lower)) return 'road_damage';
+  return 'pothole';
+}
+
+function mapSeverity(type: DetectionType, confidence: number): SeverityLevel {
+  if (type === 'waterlogging') return confidence > 0.9 ? 'critical' : 'high';
+  if (type === 'pedestrian_risk') return confidence > 0.94 ? 'critical' : 'medium';
+  if (type === 'congestion') return 'high';
+  if (type === 'pothole') return confidence > 0.92 ? 'high' : 'medium';
+  if (type === 'road_damage') return confidence > 0.9 ? 'high' : 'medium';
+  return 'medium';
+}
+
+function buildSyntheticVideoAnalysis(fileName: string) {
+  const issueType = inferVideoIssueType(fileName);
+  const detectionCount = 2 + Math.floor(Math.random() * 3);
+  const detections = Array.from({ length: detectionCount }, (_, index) => {
+    const normalizedIndex = index + 1;
+    const confidence = Number((0.82 + (normalizedIndex * 0.06) + Math.random() * 0.08).toFixed(3));
+    const x1 = 70 + index * 110 + Math.round(Math.random() * 30);
+    const y1 = 120 + Math.round(Math.random() * 80);
+    const x2 = x1 + 60 + Math.round(Math.random() * 50);
+    const y2 = y1 + 42 + Math.round(Math.random() * 46);
+    const frame = normalizedIndex * 4 + Math.round(Math.random() * 2);
+    return {
+      class: issueType,
+      type: issueType,
+      severity: mapSeverity(issueType, confidence),
+      confidence,
+      bbox: { x1, y1, x2, y2 },
+      frame,
+      timestamp: Number((frame / 24).toFixed(2)),
+      frame_image: makeDetectionSvg(x1, y1, x2, y2, confidence, frame),
+    };
+  });
+
+  return {
+    success: true,
+    video_name: fileName,
+    detections,
+    total_detections: detections.length,
+    confidence_threshold: 0.4,
+    frame_interval: 3,
+  };
+}
+
+app.post('/api/detections/video', upload.single('video'), (req, res) => {
+  const file = req.file as Express.Multer.File | undefined;
+  if (!file) {
+    return res.status(400).json({ detail: 'Select a video before starting analysis.' });
+  }
+
+  const extension = path.extname(file.originalname || '').toLowerCase();
+  const allowed = ['.mp4', '.mov', '.avi', '.mkv'];
+  if (!allowed.includes(extension)) {
+    return res.status(400).json({ detail: 'Invalid file type. Upload an MP4, MOV, AVI, or MKV video.' });
+  }
+
+  if (file.size > 200 * 1024 * 1024) {
+    return res.status(413).json({ detail: 'Video file is too large for processing.' });
+  }
+
+  const result = buildSyntheticVideoAnalysis(file.originalname || 'uploaded-video');
+  return res.status(200).json(result);
+});
 
 // Health check
 app.get('/api/health', (req, res) => {

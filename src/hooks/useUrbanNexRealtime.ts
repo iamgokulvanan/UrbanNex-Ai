@@ -312,6 +312,15 @@ export function useUrbanNexRealtime() {
     setNotifications([]);
   }, []);
 
+  const appendDetections = useCallback((incoming: Detection[]) => {
+    if (!incoming.length) return;
+    setDetections(prev => {
+      const ids = new Set(prev.map(d => d.id));
+      const merged = [...incoming, ...prev].filter(d => !ids.has(d.id) || !prev.some(item => item.id === d.id));
+      return merged;
+    });
+  }, []);
+
   return {
     buses,
     detections,
@@ -337,5 +346,6 @@ export function useUrbanNexRealtime() {
     resetSimulation,
     markNotificationRead,
     clearAllNotifications,
+    appendDetections,
   };
 }

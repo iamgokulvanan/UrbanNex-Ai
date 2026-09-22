@@ -13,6 +13,7 @@ import { AnalyticsPage } from './components/analytics/AnalyticsPage';
 import { SystemHealthPage } from './components/health/SystemHealthPage';
 import { PrivacySpecsPage } from './components/privacy/PrivacySpecsPage';
 import { LiveCamera } from './components/camera/LiveCamera';
+import { RealVideoDetection } from './components/detections/RealVideoDetection';
 import { DetectionDrawer } from './components/detections/DetectionDrawer';
 import { LoginPage } from './components/auth/LoginPage';
 import { Detection, Bus, Department, DetectionType } from './types';
@@ -62,6 +63,7 @@ export default function App() {
     markInProgress,
     resolveIncident,
     resetSimulation,
+    appendDetections,
   } = useUrbanNexRealtime();
 
   const [activeTab, setActiveTab] = useState<NavTab>('overview');
@@ -191,6 +193,84 @@ export default function App() {
   const handleAuthFormSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     void handleAuthSubmit({ name: authName, email: authEmail, password: authPassword });
+  };
+
+  const handleVideoAnalysisResult = (videoDetections: Array<{
+    class?: string;
+    type?: DetectionType;
+    confidence?: number;
+    severity?: 'low' | 'medium' | 'high' | 'critical';
+    bbox?: { x1?: number; y1?: number; x2?: number; y2?: number };
+    frame?: number;
+    timestamp?: number;
+    frame_image?: string;
+  }>, videoName?: string) => {
+    const mapToSeverity = (type: DetectionType = 'pothole', confidence = 0.9) => {
+      if (type === 'waterlogging') return confidence > 0.9 ? 'critical' : 'high';
+      if (type === 'pedestrian_risk') return confidence > 0.94 ? 'critical' : 'medium';
+      if (type === 'congestion') return 'high';
+      if (type === 'pothole') return confidence > 0.92 ? 'high' : 'medium';
+      if (type === 'road_damage') return confidence > 0.9 ? 'high' : 'medium';
+      return 'medium';
+    };
+
+    const fallbackBus = buses[0] || {
+      id: 'BUS-004',
+      routeId: 'RT-04',
+      routeName: 'Coimbatore Ring',
+      latitude: 11.0185,
+      longitude: 76.9566,
+    };
+
+    const mapped: Detection[] = videoDetections
+      .filter(d => d?.class && d?.bbox)
+      .map((detection, index) => {
+        const resolvedType = (detection.type ?? detection.class ?? 'pothole') as DetectionType;
+        const confidence = detection.confidence ?? 0.9;
+        const bbox = detection.bbox ?? {};
+        const detectionId = `DET-VIDEO-${Date.now()}-${index + 1}`;
+        const createdAt = new Date().toISOString();
+
+        return {
+          id: detectionId,
+          type: resolvedType,
+          confidence,
+          severity: detection.severity ?? mapToSeverity(resolvedType, confidence),
+          latitude: fallbackBus.latitude + (index + 1) * 0.0002,
+          longitude: fallbackBus.longitude + (index + 1) * 0.00015,
+          locationName: videoName ? `Uploaded video analysis · ${videoName}` : 'Uploaded video analysis',
+          busId: fallbackBus.id,
+          routeId: fallbackBus.routeId,
+          timestamp: createdAt,
+          status: 'pending_verification',
+          evidenceImage: detection.frame_image || 'simulated_pothole_01',
+          source: 'mobile_camera',
+          simulatedBoundingBoxes: [{
+            x: ((bbox.x1 ?? 0) / 640) * 100,
+            y: ((bbox.y1 ?? 0) / 360) * 100,
+            width: (((bbox.x2 ?? 0) - (bbox.x1 ?? 0)) / 640) * 100,
+            height: (((bbox.y2 ?? 0) - (bbox.y1 ?? 0)) / 360) * 100,
+            label: resolvedType,
+            confidence,
+          }],
+          roadSurfaceMetric: `Video upload classification (${resolvedType.replace('_', ' ')})`,
+          notes: `Imported from uploaded road video evidence${videoName ? ` (${videoName})` : ''}. Detected issue: ${resolvedType.replace('_', ' ')}.`,
+          history: [{
+            id: `H-${Date.now()}-${index}`,
+            detectionId,
+            previousStatus: 'pending_verification',
+            newStatus: 'pending_verification',
+            timestamp: createdAt,
+            changedBy: 'Video Upload Analysis',
+            note: `Imported uploaded video evidence for ${resolvedType.replace('_', ' ')}.`,
+          }],
+        } satisfies Detection;
+      });
+
+    if (!mapped.length) return;
+    appendDetections(mapped);
+    setSelectedDetection(mapped[0]);
+    setActiveTab('detections');
   };
 
   const submitMobileDetection = async (payload: {
@@ -327,6 +407,14 @@ export default function App() {
             <LiveCamera
               onSubmitDetection={submitMobileDetection}
               onOpenMap={() => setActiveTab('gis_map')}
+            />
+          )}
+
+          {activeTab === 'real_video' && (
+            <RealVideoDetection
+              onVideoAnalyzed={(videoDetections, videoName) => {
+                handleVideoAnalysisResult(videoDetections, videoName);
+              }}
             />
           )}
 

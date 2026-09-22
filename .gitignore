@@ -2,6 +2,12 @@ node_modules/
 build/
 dist/
 coverage/
+__pycache__/
+*.py[cod]
+.venv/
+*.db
+*.db-shm
+*.db-wal
 .DS_Store
 *.log
 .env*

@@ -43,21 +43,27 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   onAssign,
   onResolve,
 }) => {
+  const totalBuses = buses.length;
   const activeBuses = buses.filter(b => b.status === 'active').length;
   const pendingCount = detections.filter(d => d.status === 'pending_verification').length;
   const criticalCount = detections.filter(d => d.severity === 'critical' && d.status !== 'resolved').length;
   const resolvedCount = detections.filter(d => d.status === 'resolved').length;
   const verifiedCount = detections.filter(d => d.status === 'verified').length;
+  const liveDetectionsLastHour = detections.filter(d => {
+    const parsed = new Date(d.timestamp).getTime();
+    return Number.isFinite(parsed) && Date.now() - parsed <= 60 * 60 * 1000;
+  }).length;
+  const fleetOnlinePercent = totalBuses ? Math.round((activeBuses / totalBuses) * 100) : 0;
 
   const kpis = [
     {
       id: 'active_buses',
       title: 'Active Buses',
       value: `${activeBuses}`,
-      subtext: 'All 12 fleet units operational',
+      subtext: `${fleetOnlinePercent}% of ${totalBuses} fleet units online`,
       icon: Bus,
       color: 'text-blue-600 bg-blue-50 border-blue-200',
-      badge: '100% Online',
+      badge: `${fleetOnlinePercent}% Online`,
       badgeColor: 'bg-emerald-50 text-emerald-700',
       tab: 'fleet',
     },
@@ -65,7 +71,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       id: 'live_detections',
       title: 'Live Detections',
       value: `${detections.length}`,
-      subtext: `+${Math.max(1, Math.floor(detections.length * 0.35))} in last hour`,
+      subtext: `${liveDetectionsLastHour} in the last hour`,
       icon: Activity,
       color: 'text-indigo-600 bg-indigo-50 border-indigo-200',
       badge: 'Live Stream',
@@ -76,7 +82,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       id: 'pending_verification',
       title: 'Pending Verification',
       value: `${pendingCount}`,
-      subtext: `${verifiedCount} verified in queue`,
+      subtext: `${verifiedCount} verified and cleared`,
       icon: Clock,
       color: 'text-amber-600 bg-amber-50 border-amber-200',
       badge: pendingCount > 0 ? 'Action Needed' : 'Clear',

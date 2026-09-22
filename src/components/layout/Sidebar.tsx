@@ -12,12 +12,14 @@ import {
   ShieldCheck,
   Zap,
   Info,
-  Camera
+  Camera,
+  ScanSearch
 } from 'lucide-react';
 
 export type NavTab = 
   | 'overview'
   | 'live_camera'
+  | 'real_video'
   | 'gis_map'
   | 'detections'
   | 'fleet'
@@ -56,6 +58,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Camera,
       badge: 'Mobile',
       badgeColor: 'bg-blue-100 text-blue-700',
+    },
+    {
+      id: 'real_video' as NavTab,
+      label: 'Real AI Video',
+      icon: ScanSearch,
+      badge: 'YOLO',
+      badgeColor: 'bg-emerald-100 text-emerald-700',
     },
     {
       id: 'gis_map' as NavTab,
