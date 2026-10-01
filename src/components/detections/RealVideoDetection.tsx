@@ -18,11 +18,13 @@ type VideoResponse = {
 };
 
 interface RealVideoDetectionProps {
-  onVideoAnalyzed?: (detections: VideoDetection[], videoName?: string) => void;
+  accessToken: string;
+  onVideoAnalyzed?: (detections: VideoDetection[], videoName?: string) => void | Promise<void>;
 }
 
 const supportedExtensions = ['.mp4', '.mov', '.avi', '.mkv'];
-const backendUrl = (import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+const configuredBackendUrl = (import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+const backendUrl = import.meta.env.DEV ? configuredBackendUrl : '';
 const maxVideoBytes = 200 * 1024 * 1024;
 
 function formatTimestamp(seconds: number) {
@@ -31,7 +33,7 @@ function formatTimestamp(seconds: number) {
   return `${String(minutes).padStart(2, '0')}:${remainder}`;
 }
 
-export const RealVideoDetection: React.FC<RealVideoDetectionProps> = ({ onVideoAnalyzed }) => {
+export const RealVideoDetection: React.FC<RealVideoDetectionProps> = ({ accessToken, onVideoAnalyzed }) => {
   const [video, setVideo] = useState<File | null>(null);
   const [result, setResult] = useState<VideoResponse | null>(null);
   const [status, setStatus] = useState<'idle' | 'processing' | 'complete' | 'error'>('idle');
@@ -76,12 +78,16 @@ export const RealVideoDetection: React.FC<RealVideoDetectionProps> = ({ onVideoA
     const formData = new FormData();
     formData.append('video', video);
     try {
-      const response = await fetch(`${backendUrl}/api/detections/video`, { method: 'POST', body: formData });
+      const response = await fetch(`${backendUrl}/api/detections/video`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: formData,
+      });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || data.error || `Video processing failed (${response.status}).`);
       const videoResult = data as VideoResponse;
       setResult(videoResult);
-      onVideoAnalyzed?.(videoResult.detections, videoResult.video_name);
+      await onVideoAnalyzed?.(videoResult.detections, videoResult.video_name);
       setStatus('complete');
     } catch (requestError) {
       setStatus('error');

@@ -189,19 +189,13 @@ export const WorkflowBoard: React.FC<WorkflowBoardProps> = ({
                       {/* Action Advance Buttons */}
                       <div className="mt-3 pt-2 border-t border-slate-100 flex flex-col gap-1.5">
                         {det.status === 'pending_verification' && (
-                          <div className="grid grid-cols-2 gap-1.5">
+                          <div className="grid grid-cols-1 gap-1.5">
                             <button
                               onClick={() => onVerify(det.id)}
-                              className="py-1 text-[10px] font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center justify-center gap-1"
+                              className="w-full py-1 text-[10px] font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center justify-center gap-1"
                             >
                               <CheckCircle2 className="w-3 h-3" />
                               <span>Verify</span>
-                            </button>
-                            <button
-                              onClick={() => setSelectedDeptModal({ id: det.id })}
-                              className="py-1 text-[10px] font-bold bg-purple-50 text-purple-700 hover:bg-purple-100 rounded-lg border border-purple-200 transition-colors"
-                            >
-                              Assign
                             </button>
                           </div>
                         )}

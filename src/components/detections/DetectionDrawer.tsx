@@ -232,7 +232,7 @@ export const DetectionDrawer: React.FC<DetectionDrawerProps> = ({
                   </div>
                 )}
 
-                {(detection.status === 'pending_verification' || detection.status === 'verified') && (
+                {detection.status === 'verified' && (
                   <button
                     onClick={() => setShowAssignModal(true)}
                     className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors"

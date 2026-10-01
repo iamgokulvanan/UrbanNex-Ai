@@ -17,6 +17,7 @@ import { RealVideoDetection } from './components/detections/RealVideoDetection';
 import { DetectionDrawer } from './components/detections/DetectionDrawer';
 import { LoginPage } from './components/auth/LoginPage';
 import { Detection, Bus, Department, DetectionType } from './types';
+import { DEPARTMENTS } from './data/seedData';
 import { 
   LayoutDashboard, 
   MapPin, 
@@ -29,10 +30,6 @@ import {
   ShieldCheck,
   AlertOctagon
 } from 'lucide-react';
-
-const DEMO_SESSION_PREFIX = 'urbannex-demo:';
-const DEMO_USER_KEY = 'urbannex-demo-user';
-const DEMO_ACCOUNT_KEY = 'urbannex-demo-account';
 
 async function readApiResponse(response: Response) {
   const contentType = response.headers.get('content-type') || '';
@@ -71,7 +68,7 @@ export default function App() {
   const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+  const [user, setUser] = useState<{ id: number; name: string; email: string; role: 'main' | 'department'; department: Department | null; approved: boolean } | null>(null);
   const [sessionToken, setSessionToken] = useState(() => localStorage.getItem('urbannex-token'));
   const [authMode, setAuthMode] = useState<'login' | 'signup' | null>(null);
   const [authName, setAuthName] = useState('');
@@ -79,12 +76,16 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [authorityRequests, setAuthorityRequests] = useState<Array<{ id: number; name: string; email: string; requestedDepartment: Department; createdAt: string }>>([]);
+  const [authorityError, setAuthorityError] = useState('');
+  const [authorityNotice, setAuthorityNotice] = useState('');
 
   useEffect(() => {
     if (!sessionToken) return;
-    if (sessionToken.startsWith(DEMO_SESSION_PREFIX)) {
-      const storedUser = localStorage.getItem(DEMO_USER_KEY);
-      if (storedUser) setUser(JSON.parse(storedUser));
+    if (sessionToken.startsWith('urbannex-demo:')) {
+      localStorage.removeItem('urbannex-token');
+      setSessionToken(null);
+      setUser(null);
       return;
     }
     fetch('/api/auth/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
@@ -99,6 +100,15 @@ export default function App() {
         setUser(null);
       });
   }, [sessionToken]);
+
+  useEffect(() => {
+    if (!user) return;
+    if (user.role === 'main') {
+      void loadAuthorityRequests(sessionToken || '');
+    } else if (!['workflow', 'incidents'].includes(activeTab)) {
+      setActiveTab('workflow');
+    }
+  }, [user, sessionToken]);
 
   // Handlers
   const handleSelectDetectionById = (id?: string) => {
@@ -128,7 +138,7 @@ export default function App() {
       .map(detection => ({ id: detection.id, label: detection.id, detail: `${detection.type.replace('_', ' ')} · ${detection.locationName}`, kind: 'detection' as const })),
   ].slice(0, 8) : [];
 
-  const handleAuthSubmit = async ({ name, email, password }: { name: string; email: string; password: string }) => {
+  const handleAuthSubmit = async ({ name, email, password, accountType, department }: { name: string; email: string; password: string; accountType: 'main' | 'department'; department: Department }) => {
     setAuthSubmitting(true);
     setAuthError('');
     const normalizedEmail = email.trim().toLowerCase();
@@ -136,9 +146,14 @@ export default function App() {
       const response = await fetch(`/api/auth/${authMode === 'signup' ? 'signup' : 'login'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password }),
+        body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password, accountType, department }),
       });
       const data = await readApiResponse(response);
+      if (response.status === 202 && data.pendingApproval) {
+        setAuthError(data.message);
+        setAuthMode('login');
+        return;
+      }
       if (!response.ok) throw new Error(data.error || 'Unable to authenticate.');
       localStorage.setItem('urbannex-token', data.token);
       setSessionToken(data.token);
@@ -147,37 +162,65 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to authenticate.';
       if (message.startsWith('The authentication service')) {
-        const storedAccount = localStorage.getItem(DEMO_ACCOUNT_KEY);
-        const account = storedAccount ? JSON.parse(storedAccount) as { name: string; email: string; password: string } : null;
-        if (authMode === 'signup') {
-          if (account && account.email === normalizedEmail) {
-            setAuthError('An account with this email already exists. Please log in.');
-            return;
-          }
-          localStorage.setItem(DEMO_ACCOUNT_KEY, JSON.stringify({
-            name: name.trim() || 'Command Authority',
-            email: normalizedEmail,
-            password,
-          }));
-        } else if (!account || account.email !== normalizedEmail || account.password !== password) {
-          setAuthError('Invalid email or password.');
-          return;
-        }
-        const demoUser = account && authMode === 'login'
-          ? { name: account.name, email: account.email }
-          : { name: name.trim() || 'Command Authority', email: normalizedEmail };
-        const demoToken = `${DEMO_SESSION_PREFIX}${Date.now()}`;
-        localStorage.setItem(DEMO_USER_KEY, JSON.stringify(demoUser));
-        localStorage.setItem('urbannex-token', demoToken);
-        setSessionToken(demoToken);
-        setUser(demoUser);
-        setAuthMode(null);
+        setAuthError('The authority service is required for secure sign-in and department assignment. Start the backend and try again.');
       } else {
         setAuthError(message);
       }
     } finally {
       setAuthSubmitting(false);
     }
+  };
+
+  const requestPasswordReset = async (email: string) => {
+    const response = await fetch('/api/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not request a password reset.');
+    return data as { message?: string; developmentToken?: string };
+  };
+
+  const resetAccountPassword = async (email: string, token: string, password: string) => {
+    const response = await fetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, token, password }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not reset the password.');
+  };
+
+  const loadAuthorityRequests = async (token: string) => {
+    try {
+      const response = await fetch('/api/admin/authority-requests', { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) throw new Error('Could not load department access requests.');
+      const data = await response.json();
+      setAuthorityRequests(data.requests);
+      setAuthorityError('');
+    } catch (error) {
+      setAuthorityError(error instanceof Error ? error.message : 'Could not load department access requests.');
+    }
+  };
+
+  const approveAuthorityRequest = async (id: number, department: Department) => {
+    if (!sessionToken) return;
+    const response = await fetch(`/api/admin/authority-requests/${id}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
+      body: JSON.stringify({ department }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setAuthorityError(data.error || 'Could not approve the authority request.');
+      return;
+    }
+    setAuthorityError('');
+    setAuthorityNotice(data.emailSent
+      ? `Access approved for ${department}; an email was sent to the authority.`
+      : `Access approved for ${department}; approval email was not sent. Configure RESEND_API_KEY and AUTH_FROM_EMAIL.`);
+    setAuthorityRequests((requests) => requests.filter((request) => request.id !== id));
   };
 
   const handleLogout = () => {
@@ -187,15 +230,14 @@ export default function App() {
     setUser(null);
     setSessionToken(null);
     localStorage.removeItem('urbannex-token');
-    localStorage.removeItem(DEMO_USER_KEY);
   };
 
   const handleAuthFormSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    void handleAuthSubmit({ name: authName, email: authEmail, password: authPassword });
+    void handleAuthSubmit({ name: authName, email: authEmail, password: authPassword, accountType: 'department', department: DEPARTMENTS[0] });
   };
 
-  const handleVideoAnalysisResult = (videoDetections: Array<{
+  const handleVideoAnalysisResult = async (videoDetections: Array<{
     class?: string;
     type?: DetectionType;
     confidence?: number;
@@ -268,8 +310,19 @@ export default function App() {
       });
 
     if (!mapped.length) return;
-    appendDetections(mapped);
-    setSelectedDetection(mapped[0]);
+    const response = await fetch('/api/detections/import-video', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+      },
+      body: JSON.stringify({ detections: mapped }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Unable to save analyzed video detections.');
+    const persistedDetections = data.detections as Detection[];
+    appendDetections(persistedDetections);
+    setSelectedDetection(persistedDetections[0]);
     setActiveTab('detections');
   };
 
@@ -281,7 +334,6 @@ export default function App() {
     timestamp: string;
     evidenceImage?: string;
   }) => {
-    if (sessionToken?.startsWith(DEMO_SESSION_PREFIX)) return;
     const response = await fetch('/api/detections/mobile', {
       method: 'POST',
       headers: {
@@ -300,6 +352,8 @@ export default function App() {
         mode={authMode === 'signup' ? 'signup' : 'login'}
         onModeChange={setAuthMode}
         onSubmit={handleAuthSubmit}
+        onForgotPassword={requestPasswordReset}
+        onResetPassword={resetAccountPassword}
         errorMessage={authError}
         isSubmitting={authSubmitting}
       />
@@ -312,7 +366,9 @@ export default function App() {
       <Topbar
         simulation={simulation}
         wsConnected={wsConnected}
-        notifications={notifications}
+        notifications={user.role === 'main' ? notifications : notifications.filter((notification) =>
+          detections.some((detection) => detection.id === notification.relatedDetectionId)
+        )}
         onPause={pauseSimulation}
         onResume={resumeSimulation}
         onSetSpeed={setSimulationSpeed}
@@ -333,6 +389,8 @@ export default function App() {
           }
         }}
         user={user}
+        userRole={user.role}
+        userDepartment={user.department}
         onOpenAuth={setAuthMode}
         onLogout={handleLogout}
       />
@@ -343,6 +401,7 @@ export default function App() {
         <div className="hidden md:block">
           <Sidebar
             activeTab={activeTab}
+            userRole={user.role}
             onSelectTab={(tab) => {
               setActiveTab(tab);
               window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -373,6 +432,7 @@ export default function App() {
               <div className="flex-1 overflow-y-auto">
                 <Sidebar
                   activeTab={activeTab}
+                  userRole={user.role}
                   onSelectTab={(tab) => {
                     setActiveTab(tab);
                     setMobileMenuOpen(false);
@@ -385,9 +445,36 @@ export default function App() {
             </div>
           </div>
         )}
-
-        {/* Dynamic Center Stage Views */}
         <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pb-16 md:pb-6">
+          {activeTab === 'authorities' && user.role === 'main' && (
+            <section className="mx-auto max-w-5xl space-y-5 p-4 md:p-8">
+              <header className="border-b border-slate-200 pb-4">
+                <p className="text-xs font-bold uppercase tracking-widest text-cyan-800">Main branch administration</p>
+                <h1 className="mt-1 text-2xl font-bold text-slate-900">Department access requests</h1>
+                <p className="mt-1 text-sm text-slate-500">Assign each authority to one department before approving dashboard access.</p>
+              </header>
+              {authorityError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{authorityError}</p>}
+              {authorityNotice && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{authorityNotice}</p>}
+              {authorityRequests.length === 0 ? (
+                <p className="py-12 text-center text-sm text-slate-500">No authority requests are waiting for review.</p>
+              ) : authorityRequests.map((request) => (
+                <article key={request.id} className="grid gap-3 border-b border-slate-200 py-4 sm:grid-cols-[1fr_220px_auto] sm:items-center">
+                  <div className="min-w-0">
+                    <h2 className="text-sm font-bold text-slate-900">{request.name}</h2>
+                    <p className="truncate text-xs text-slate-500">{request.email}</p>
+                    <p className="mt-1 text-xs text-slate-600">Requested: {request.requestedDepartment}</p>
+                  </div>
+                  <select aria-label={`Assign department to ${request.name}`} defaultValue={request.requestedDepartment} id={`department-${request.id}`} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800">
+                    {DEPARTMENTS.map((department) => <option key={department} value={department}>{department}</option>)}
+                  </select>
+                  <button onClick={() => {
+                    const select = document.getElementById(`department-${request.id}`) as HTMLSelectElement | null;
+                    if (select) void approveAuthorityRequest(request.id, select.value as Department);
+                  }} className="rounded-lg bg-[#0b4b61] px-4 py-2 text-xs font-bold text-white hover:bg-[#07394a]">Assign and approve</button>
+                </article>
+              ))}
+            </section>
+          )}
           {activeTab === 'overview' && (
             <OverviewDashboard
               buses={buses}
@@ -412,6 +499,7 @@ export default function App() {
 
           {activeTab === 'real_video' && (
             <RealVideoDetection
+              accessToken={sessionToken || ''}
               onVideoAnalyzed={(videoDetections, videoName) => {
                 handleVideoAnalysisResult(videoDetections, videoName);
               }}
@@ -528,7 +616,7 @@ export default function App() {
 
       {/* Mobile Bottom Navigation Bar */}
       <div className="md:hidden fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur-md border-t border-slate-200 py-2 px-3 flex items-center justify-around z-30 shadow-lg">
-        <button
+        {user.role === 'main' && <button
           onClick={() => setActiveTab('overview')}
           className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
             activeTab === 'overview' ? 'text-blue-600' : 'text-slate-500'
@@ -536,9 +624,9 @@ export default function App() {
         >
           <LayoutDashboard className="w-4 h-4" />
           <span>Overview</span>
-        </button>
+        </button>}
 
-        <button
+        {user.role === 'main' && <button
           onClick={() => setActiveTab('gis_map')}
           className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
             activeTab === 'gis_map' ? 'text-blue-600' : 'text-slate-500'
@@ -546,9 +634,9 @@ export default function App() {
         >
           <MapPin className="w-4 h-4" />
           <span>GIS Map</span>
-        </button>
+        </button>}
 
-        <button
+        {user.role === 'main' && <button
           onClick={() => setActiveTab('live_camera')}
           className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
             activeTab === 'live_camera' ? 'text-blue-600' : 'text-slate-500'
@@ -556,9 +644,9 @@ export default function App() {
         >
           <Camera className="w-4 h-4" />
           <span>Camera</span>
-        </button>
+        </button>}
 
-        <button
+        {user.role === 'main' && <button
           onClick={() => setActiveTab('detections')}
           className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
             activeTab === 'detections' ? 'text-blue-600' : 'text-slate-500'
@@ -566,7 +654,7 @@ export default function App() {
         >
           <Activity className="w-4 h-4" />
           <span>Detections</span>
-        </button>
+        </button>}
 
         <button
           onClick={() => setActiveTab('workflow')}

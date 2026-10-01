@@ -1,7 +1,8 @@
 import express from 'express';
+import 'dotenv/config';
 import http from 'http';
 import path from 'path';
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import Database from 'better-sqlite3';
 import multer from 'multer';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -45,6 +46,10 @@ database.exec(`
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     password_salt TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'department',
+    department TEXT,
+    requested_department TEXT,
+    approved INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS sessions (
@@ -58,9 +63,71 @@ database.exec(`
     payload TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS detection_state (
+    id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS password_resets (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `);
 
-type AuthUser = { id: number; name: string; email: string };
+const userColumns = database.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+for (const [column, definition] of [
+  ['role', "TEXT NOT NULL DEFAULT 'department'"],
+  ['department', 'TEXT'],
+  ['requested_department', 'TEXT'],
+  ['approved', 'INTEGER NOT NULL DEFAULT 0'],
+] as const) {
+  if (!userColumns.some((item) => item.name === column)) {
+    database.exec(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+type AuthUser = {
+  id: number;
+  name: string;
+  email: string;
+  role: 'main' | 'department';
+  department: Department | null;
+  approved: boolean;
+};
+
+type UserRecord = Omit<AuthUser, 'approved'> & { approved: number };
+
+function publicUser(user: AuthUser) {
+  return { ...user };
+}
+
+function bootstrapMainBranch() {
+  const email = process.env.URBANNEX_ADMIN_EMAIL?.trim().toLowerCase();
+  const password = process.env.URBANNEX_ADMIN_PASSWORD;
+  if (!email || !password) {
+    console.warn('[Auth] Set URBANNEX_ADMIN_EMAIL and URBANNEX_ADMIN_PASSWORD to enable main-branch access.');
+    return;
+  }
+  if (password.length < 4) throw new Error('URBANNEX_ADMIN_PASSWORD must be at least 4 characters.');
+
+  const existing = database.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number } | undefined;
+  if (existing) {
+    const credentials = hashPassword(password);
+    database.prepare("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main', department = NULL, requested_department = NULL, approved = 1 WHERE id = ?")
+      .run(credentials.hash, credentials.salt, existing.id);
+    return;
+  }
+
+  const credentials = hashPassword(password);
+  database.prepare(`
+    INSERT INTO users (name, email, password_hash, password_salt, role, approved, created_at)
+    VALUES (?, ?, ?, ?, 'main', 1, ?)
+  `).run('Main Branch Authority', email, credentials.hash, credentials.salt, new Date().toISOString());
+}
+
+bootstrapMainBranch();
 
 function hashPassword(password: string, salt = randomBytes(16).toString('hex')) {
   return {
@@ -69,14 +136,62 @@ function hashPassword(password: string, salt = randomBytes(16).toString('hex')) 
   };
 }
 
+async function sendAuthorityEmail(to: string, subject: string, text: string) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.AUTH_FROM_EMAIL;
+  if (!apiKey || !from) {
+    console.warn('[Email] Resend is not configured; authority email was not delivered.');
+    return false;
+  }
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from, to: [to], subject, text }),
+  });
+  if (!response.ok) throw new Error(`Email provider responded with ${response.status}`);
+  return true;
+}
+
+function getApplicationUrl() {
+  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '');
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return 'http://localhost:3000';
+}
+
+function notifyDepartmentOfIncident(detection: Detection, changedBy: string) {
+  if (!detection.department) return;
+  const recipients = database.prepare(`
+    SELECT email FROM users WHERE role = 'department' AND department = ? AND approved = 1
+  `).all(detection.department) as Array<{ email: string }>;
+  const subject = `UrbanNex incident ${detection.id}: ${detection.status.replace('_', ' ')}`;
+  const text = [
+    `Incident ${detection.id} has been updated.`,
+    `Type: ${detection.type.replace('_', ' ')}`,
+    `Severity: ${detection.severity}`,
+    `Status: ${detection.status.replace('_', ' ')}`,
+    `Department: ${detection.department}`,
+    `Location: ${detection.locationName}`,
+    `Coordinates: ${detection.latitude}, ${detection.longitude}`,
+    `Bus / route: ${detection.busId} / ${detection.routeId}`,
+    `Updated by: ${changedBy}`,
+    detection.notes ? `Notes: ${detection.notes}` : '',
+    `Open UrbanNex: ${getApplicationUrl()}`,
+  ].filter(Boolean).join('\n');
+  for (const recipient of recipients) {
+    void sendAuthorityEmail(recipient.email, subject, text).catch((error) => {
+      console.error(`[Email] Incident notification delivery failed for ${detection.id}:`, error);
+    });
+  }
+}
+
 function getUserByToken(token: string | undefined): AuthUser | null {
   if (!token) return null;
   const user = database.prepare(`
-    SELECT users.id, users.name, users.email
+    SELECT users.id, users.name, users.email, users.role, users.department, users.approved
     FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token = ?
-  `).get(token) as AuthUser | undefined;
-  return user || null;
+  `).get(token) as UserRecord | undefined;
+  return user ? { ...user, approved: Boolean(user.approved) } : null;
 }
 
 function getBearerToken(req: express.Request) {
@@ -88,12 +203,62 @@ function createSession(user: AuthUser) {
   const token = randomBytes(32).toString('hex');
   database.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)')
     .run(token, user.id, new Date().toISOString());
-  return { token, user };
+  return { token, user: publicUser(user) };
+}
+
+function requireUser(req: express.Request, res: express.Response): AuthUser | null {
+  const user = getUserByToken(getBearerToken(req));
+  if (!user || !user.approved) {
+    res.status(401).json({ error: 'Please sign in with an approved authority account.' });
+    return null;
+  }
+  return user;
+}
+
+function requireMainBranch(req: express.Request, res: express.Response): AuthUser | null {
+  const user = requireUser(req, res);
+  if (!user) return null;
+  if (user.role !== 'main') {
+    res.status(403).json({ error: 'Main-branch authority is required for this action.' });
+    return null;
+  }
+  return user;
+}
+
+function canAccessDetection(user: AuthUser, detection: Detection) {
+  return user.role === 'main' || detection.department === user.department;
 }
 
 // In-memory persistent state for prototype demonstration
 let buses: Bus[] = JSON.parse(JSON.stringify(INITIAL_BUSES));
-let detections: Detection[] = JSON.parse(JSON.stringify(INITIAL_DETECTIONS));
+function loadPersistedDetections(): Detection[] {
+  const rows = [
+    ...database.prepare('SELECT payload FROM detection_state ORDER BY updated_at DESC').all() as Array<{ payload: string }>,
+    ...database.prepare('SELECT payload FROM mobile_detections ORDER BY created_at DESC').all() as Array<{ payload: string }>,
+  ];
+  const byId = new Map<string, Detection>();
+  for (const row of rows) {
+    try {
+      const detection = JSON.parse(row.payload) as Detection;
+      if (detection?.id && !byId.has(detection.id)) byId.set(detection.id, detection);
+    } catch {
+      console.error('[Database] Skipping malformed persisted detection payload.');
+    }
+  }
+  for (const detection of INITIAL_DETECTIONS) {
+    if (!byId.has(detection.id)) byId.set(detection.id, detection);
+  }
+  return [...byId.values()].slice(0, 200);
+}
+
+function persistDetection(detection: Detection) {
+  database.prepare(`
+    INSERT INTO detection_state (id, payload, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
+  `).run(detection.id, JSON.stringify(detection), new Date().toISOString());
+}
+
+let detections: Detection[] = loadPersistedDetections();
 let simulationRunning = true;
 let simulationSpeedMultiplier: 1 | 2 | 3 = 1;
 let detectionCounter = 129;
@@ -102,13 +267,21 @@ const demoInference = new DemoInferenceService();
 
 // WebSocket Server on /ws/live
 const wss = new WebSocketServer({ server, path: '/ws/live' });
+const socketUsers = new WeakMap<WebSocket, AuthUser>();
 
 function broadcast(type: string, payload: any) {
-  const message = JSON.stringify({ type, data: payload, timestamp: new Date().toISOString() });
+  const timestamp = new Date().toISOString();
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    const user = socketUsers.get(client);
+    if (user && client.readyState === WebSocket.OPEN) {
       try {
-        client.send(message);
+        if (user.role !== 'main' && !['init:state', 'detection:new', 'detection:status_changed'].includes(type)) return;
+        if (type === 'detection:new' && !canAccessDetection(user, payload.detection)) return;
+        if (type === 'detection:status_changed' && !canAccessDetection(user, payload.detection)) return;
+        const scopedPayload = type === 'init:state' && user.role !== 'main'
+          ? { ...payload, buses: [], routes: [], detections: payload.detections.filter((detection: Detection) => canAccessDetection(user, detection)), simulation: undefined }
+          : payload;
+        client.send(JSON.stringify({ type, data: scopedPayload, timestamp }));
       } catch (err) {
         console.error('WS broadcast error:', err);
       }
@@ -117,30 +290,40 @@ function broadcast(type: string, payload: any) {
 }
 
 // Client connection handling
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const user = getUserByToken(requestUrl.searchParams.get('token') || undefined);
+  if (!user || !user.approved) {
+    ws.close(1008, 'Authentication required');
+    return;
+  }
+  socketUsers.set(ws, user);
   console.log(`[WS] Client connected. Total clients: ${wss.clients.size}`);
 
-  // Send initial full state
+  const initialState = user.role === 'main' ? {
+    buses,
+    detections,
+    routes: INITIAL_ROUTES,
+    departments: DEPARTMENTS,
+    simulation: { isRunning: simulationRunning, speed: simulationSpeedMultiplier },
+    modelInfo: demoInference.getModelInfo(),
+  } : {
+    buses: [],
+    detections: detections.filter((detection) => canAccessDetection(user, detection)),
+    routes: [],
+    departments: [],
+    modelInfo: demoInference.getModelInfo(),
+  };
   ws.send(JSON.stringify({
     type: 'init:state',
-    data: {
-      buses,
-      detections,
-      routes: INITIAL_ROUTES,
-      departments: DEPARTMENTS,
-      simulation: {
-        isRunning: simulationRunning,
-        speed: simulationSpeedMultiplier,
-      },
-      modelInfo: demoInference.getModelInfo(),
-    },
+    data: initialState,
     timestamp: new Date().toISOString(),
   }));
 
   ws.on('message', (raw) => {
     try {
       const parsed = JSON.parse(raw.toString());
-      handleClientCommand(parsed, ws);
+      handleClientCommand(parsed, ws, user);
     } catch (e) {
       console.error('Invalid WS message payload:', e);
     }
@@ -151,7 +334,11 @@ wss.on('connection', (ws) => {
   });
 });
 
-function handleClientCommand(msg: { action: string; [key: string]: any }, sender?: WebSocket) {
+function handleClientCommand(msg: { action: string; [key: string]: any }, sender: WebSocket, user: AuthUser) {
+  if (user.role !== 'main') {
+    const detection = detections.find((item) => item.id === msg.detectionId);
+    if (detection?.department !== user.department || !['in_progress', 'resolve'].includes(msg.action)) return;
+  }
   switch (msg.action) {
     case 'pause':
       simulationRunning = false;
@@ -178,6 +365,9 @@ function handleClientCommand(msg: { action: string; [key: string]: any }, sender
       break;
     case 'assign':
       updateIncidentStatus(msg.detectionId, 'assigned', 'Command Authority (Quick WS)', msg.department);
+      break;
+    case 'in_progress':
+      updateIncidentStatus(msg.detectionId, 'in_progress', user.name);
       break;
     case 'resolve':
       updateIncidentStatus(msg.detectionId, 'resolved', 'Field Inspector (Quick WS)', undefined, msg.notes);
@@ -325,7 +515,8 @@ async function triggerSimulatedDetection(selectedBusId?: string, forcedType?: st
   };
 
   // Add to top of list
-  detections = [newDetection, ...detections.slice(0, 49)];
+  detections = [newDetection, ...detections.slice(0, 199)];
+  persistDetection(newDetection);
 
   // Update target bus stats
   targetBus.totalDetections += 1;
@@ -365,6 +556,15 @@ function updateIncidentStatus(
 
   const current = detections[index];
   const prevStatus = current.status;
+  const allowedPreviousStatuses: Partial<Record<IncidentStatus, IncidentStatus[]>> = {
+    verified: ['pending_verification'],
+    rejected: ['pending_verification'],
+    assigned: ['verified'],
+    in_progress: ['assigned'],
+    resolved: ['in_progress'],
+  };
+  if (allowedPreviousStatuses[newStatus] && !allowedPreviousStatuses[newStatus]?.includes(prevStatus)) return null;
+  if (newStatus === 'assigned' && (!department || !DEPARTMENTS.includes(department))) return null;
 
   const historyEntry: IncidentHistoryEntry = {
     id: `H-${Date.now()}`,
@@ -385,6 +585,10 @@ function updateIncidentStatus(
   };
 
   detections[index] = updated;
+  persistDetection(updated);
+  if (['assigned', 'in_progress', 'resolved'].includes(newStatus)) {
+    notifyDepartmentOfIncident(updated, changedBy);
+  }
 
   // Broadcast status update
   broadcast('detection:status_changed', {
@@ -404,7 +608,6 @@ function updateIncidentStatus(
 
 function resetSimulation() {
   buses = JSON.parse(JSON.stringify(INITIAL_BUSES));
-  detections = JSON.parse(JSON.stringify(INITIAL_DETECTIONS));
   simulationRunning = true;
   simulationSpeedMultiplier = 1;
   broadcast('simulation:reset', {
@@ -502,7 +705,10 @@ function buildSyntheticVideoAnalysis(fileName: string) {
   };
 }
 
-app.post('/api/detections/video', upload.single('video'), (req, res) => {
+app.post('/api/detections/video', (req, res, next) => {
+  if (!requireMainBranch(req, res)) return;
+  next();
+}, upload.single('video'), (req, res) => {
   const file = req.file as Express.Multer.File | undefined;
   if (!file) {
     return res.status(400).json({ detail: 'Select a video before starting analysis.' });
@@ -532,18 +738,18 @@ app.post('/api/auth/signup', (req, res) => {
   const name = String(req.body.name || '').trim();
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  if (!name || !email || password.length < 6) {
-    return res.status(400).json({ error: 'Name, email, and a password of at least 6 characters are required.' });
+  const requestedDepartment = String(req.body.department || '');
+  if (!name || !email || password.length < 4 || !DEPARTMENTS.includes(requestedDepartment as Department)) {
+    return res.status(400).json({ error: 'Name, valid department, and a password of at least 4 characters are required.' });
   }
 
   const credentials = hashPassword(password);
   try {
     const result = database.prepare(`
-      INSERT INTO users (name, email, password_hash, password_salt, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(name, email, credentials.hash, credentials.salt, new Date().toISOString());
-    const user = { id: Number(result.lastInsertRowid), name, email };
-    return res.status(201).json(createSession(user));
+      INSERT INTO users (name, email, password_hash, password_salt, role, requested_department, approved, created_at)
+      VALUES (?, ?, ?, ?, 'department', ?, 0, ?)
+    `).run(name, email, credentials.hash, credentials.salt, requestedDepartment, new Date().toISOString());
+    return res.status(202).json({ pendingApproval: true, message: 'Your account request was sent to the main branch for approval.' });
   } catch (error) {
     if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
       return res.status(409).json({ error: 'An account with this email already exists.' });
@@ -552,11 +758,80 @@ app.post('/api/auth/signup', (req, res) => {
   }
 });
 
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!email || email.length > 254) return res.status(400).json({ error: 'Enter a valid account email.' });
+  const genericMessage = 'If an account exists for that email, password reset instructions have been sent.';
+  const account = database.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number } | undefined;
+  if (!account) return res.json({ message: genericMessage });
+
+  const resetToken = randomBytes(32).toString('hex');
+  const tokenHash = createHash('sha256').update(resetToken).digest('hex');
+  const now = new Date();
+  database.prepare('DELETE FROM password_resets WHERE user_id = ?').run(account.id);
+  database.prepare('INSERT INTO password_resets (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
+    .run(tokenHash, account.id, new Date(now.getTime() + 30 * 60 * 1000).toISOString(), now.toISOString());
+
+  const resendKey = process.env.RESEND_API_KEY;
+  const fromEmail = process.env.AUTH_FROM_EMAIL;
+  if (resendKey && fromEmail) {
+    try {
+      const delivery = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: fromEmail,
+          to: [email],
+          subject: 'UrbanNex password reset',
+          text: `Use this one-time reset token within 30 minutes: ${resetToken}`,
+        }),
+      });
+      if (!delivery.ok) throw new Error(`Email provider responded with ${delivery.status}`);
+      return res.json({ message: genericMessage });
+    } catch (error) {
+      database.prepare('DELETE FROM password_resets WHERE token_hash = ?').run(tokenHash);
+      console.error('[Auth] Password reset email delivery failed:', error);
+      return res.status(503).json({ error: 'Password reset email could not be sent. Please contact your administrator.' });
+    }
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    return res.json({ message: genericMessage, developmentToken: resetToken });
+  }
+  database.prepare('DELETE FROM password_resets WHERE token_hash = ?').run(tokenHash);
+  return res.status(503).json({ error: 'Password reset delivery is not configured. Please contact your administrator.' });
+});
+
+app.post('/api/auth/reset-password', (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const token = String(req.body.token || '').trim();
+  const password = String(req.body.password || '');
+  if (!email || !token || password.length < 4) {
+    return res.status(400).json({ error: 'Email, reset token, and a password of at least 4 characters are required.' });
+  }
+  const user = database.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number } | undefined;
+  if (!user) return res.status(400).json({ error: 'Reset token is invalid or expired.' });
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const reset = database.prepare(`
+    SELECT token_hash FROM password_resets
+    WHERE token_hash = ? AND user_id = ? AND expires_at > ?
+  `).get(tokenHash, user.id, new Date().toISOString()) as { token_hash: string } | undefined;
+  if (!reset) return res.status(400).json({ error: 'Reset token is invalid or expired.' });
+
+  const credentials = hashPassword(password);
+  database.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?')
+    .run(credentials.hash, credentials.salt, user.id);
+  database.prepare('DELETE FROM password_resets WHERE user_id = ?').run(user.id);
+  database.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+  return res.json({ message: 'Password updated. Sign in using your new password.' });
+});
+
 app.post('/api/auth/login', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const record = database.prepare('SELECT id, name, email, password_hash, password_salt FROM users WHERE email = ?')
-    .get(email) as { id: number; name: string; email: string; password_hash: string; password_salt: string } | undefined;
+  const accountType = String(req.body.accountType || 'department');
+  const record = database.prepare('SELECT id, name, email, password_hash, password_salt, role, department, approved FROM users WHERE email = ?')
+    .get(email) as (UserRecord & { password_hash: string; password_salt: string }) | undefined;
   if (!record) return res.status(401).json({ error: 'Invalid email or password.' });
 
   const suppliedHash = Buffer.from(hashPassword(password, record.password_salt).hash, 'hex');
@@ -564,14 +839,66 @@ app.post('/api/auth/login', (req, res) => {
   if (suppliedHash.length !== storedHash.length || !timingSafeEqual(suppliedHash, storedHash)) {
     return res.status(401).json({ error: 'Invalid email or password.' });
   }
+  if (record.role !== accountType) return res.status(401).json({ error: 'This account does not have that authority type.' });
+  if (!record.approved) return res.status(403).json({ error: 'Your department access is awaiting main-branch approval.' });
 
-  return res.json(createSession({ id: record.id, name: record.name, email: record.email }));
+  return res.json(createSession({
+    id: record.id,
+    name: record.name,
+    email: record.email,
+    role: record.role,
+    department: record.department,
+    approved: Boolean(record.approved),
+  }));
 });
 
 app.get('/api/auth/me', (req, res) => {
   const user = getUserByToken(getBearerToken(req));
   if (!user) return res.status(401).json({ error: 'Session expired.' });
+  if (!user.approved) return res.status(403).json({ error: 'Your department access is awaiting main-branch approval.' });
   return res.json({ user });
+});
+
+app.get('/api/admin/authority-requests', (req, res) => {
+  if (!requireMainBranch(req, res)) return;
+  const requests = database.prepare(`
+    SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
+    FROM users WHERE role = 'department' AND approved = 0 ORDER BY created_at ASC
+  `).all();
+  res.json({ requests });
+});
+
+app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
+  const approver = requireMainBranch(req, res);
+  if (!approver) return;
+  const department = String(req.body.department || '');
+  if (!DEPARTMENTS.includes(department as Department)) {
+    return res.status(400).json({ error: 'Choose a valid department.' });
+  }
+  const result = database.prepare(`
+    UPDATE users SET department = ?, approved = 1
+    WHERE id = ? AND role = 'department' AND approved = 0
+  `).run(department, Number(req.params.id));
+  if (!result.changes) return res.status(404).json({ error: 'Authority request not found.' });
+  const account = database.prepare('SELECT name, email FROM users WHERE id = ?').get(Number(req.params.id)) as { name: string; email: string };
+  let emailSent = false;
+  try {
+    emailSent = await sendAuthorityEmail(
+      account.email,
+      'Your UrbanNex department access is approved',
+      [
+        `Hello ${account.name},`,
+        '',
+        `Main branch approved your authority account for: ${department}.`,
+        'Sign in using the Department authority desk and the password you set during signup.',
+        'For security, your password is not included in this email.',
+        `Open UrbanNex: ${getApplicationUrl()}`,
+      ].join('\n'),
+    );
+  } catch (error) {
+    console.error('[Email] Authority approval notification failed:', error);
+  }
+  res.json({ approved: true, department, emailSent, approvedBy: approver.name });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -582,10 +909,16 @@ app.post('/api/auth/logout', (req, res) => {
 
 // Buses
 app.get('/api/buses', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  if (user.role !== 'main') return res.json({ buses: [], count: 0 });
   res.json({ buses, count: buses.length });
 });
 
 app.get('/api/buses/:id', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  if (user.role !== 'main') return res.status(403).json({ error: 'Fleet details are restricted to main branch.' });
   const bus = buses.find(b => b.id === req.params.id);
   if (!bus) return res.status(404).json({ error: 'Bus not found' });
   res.json(bus);
@@ -593,8 +926,8 @@ app.get('/api/buses/:id', (req, res) => {
 
 // Detections
 app.post('/api/detections/mobile', async (req, res) => {
-  const user = getUserByToken(getBearerToken(req));
-  if (!user) return res.status(401).json({ error: 'Please sign in before submitting a camera capture.' });
+  const user = requireMainBranch(req, res);
+  if (!user) return;
 
   const detectionType = req.body.detectionType as DetectionType;
   const latitude = Number(req.body.latitude);
@@ -644,9 +977,10 @@ app.post('/api/detections/mobile', async (req, res) => {
     }],
   };
 
-  detections = [detection, ...detections.slice(0, 49)];
+  detections = [detection, ...detections.slice(0, 199)];
   database.prepare('INSERT INTO mobile_detections (id, user_id, payload, created_at) VALUES (?, ?, ?, ?)')
     .run(detection.id, user.id, JSON.stringify(detection), new Date().toISOString());
+  persistDetection(detection);
   broadcast('detection:new', {
     detection,
     notification: {
@@ -662,8 +996,12 @@ app.post('/api/detections/mobile', async (req, res) => {
 });
 
 app.get('/api/detections', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
   const { type, severity, status, bus_id } = req.query;
-  let filtered = [...detections];
+  let filtered = user.role === 'main'
+    ? [...detections]
+    : detections.filter((detection) => canAccessDetection(user, detection));
   if (type) filtered = filtered.filter(d => d.type === type);
   if (severity) filtered = filtered.filter(d => d.severity === severity);
   if (status) filtered = filtered.filter(d => d.status === status);
@@ -672,52 +1010,135 @@ app.get('/api/detections', (req, res) => {
 });
 
 app.get('/api/detections/:id', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
   const detection = detections.find(d => d.id === req.params.id);
   if (!detection) return res.status(404).json({ error: 'Detection not found' });
+  if (!canAccessDetection(user, detection)) return res.status(404).json({ error: 'Detection not found' });
   res.json(detection);
 });
 
+app.post('/api/detections/import-video', (req, res) => {
+  const user = requireMainBranch(req, res);
+  if (!user) return;
+  const incoming = req.body.detections;
+  if (!Array.isArray(incoming) || incoming.length < 1 || incoming.length > 50) {
+    return res.status(400).json({ error: 'Submit between 1 and 50 analyzed detections.' });
+  }
+
+  const allowedTypes: DetectionType[] = ['pothole', 'road_damage', 'waterlogging', 'congestion', 'pedestrian_risk'];
+  const createdAt = new Date().toISOString();
+  const imported: Detection[] = [];
+  for (const item of incoming) {
+    const latitude = Number(item.latitude);
+    const longitude = Number(item.longitude);
+    const confidence = Number(item.confidence);
+    if (!allowedTypes.includes(item.type) || !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+        !Number.isFinite(longitude) || longitude < -180 || longitude > 180 || !Number.isFinite(confidence) || confidence < 0 || confidence > 1 ||
+        typeof item.locationName !== 'string' || typeof item.busId !== 'string' || typeof item.routeId !== 'string') {
+      return res.status(400).json({ error: 'Video analysis contains an invalid detection record.' });
+    }
+    const detectionId = `VID-${new Date().getUTCFullYear()}-${randomBytes(6).toString('hex').toUpperCase()}`;
+    const detection: Detection = {
+      id: detectionId,
+      type: item.type,
+      confidence,
+      severity: ['low', 'medium', 'high', 'critical'].includes(item.severity) ? item.severity : 'medium',
+      latitude,
+      longitude,
+      locationName: item.locationName.slice(0, 240),
+      busId: item.busId.slice(0, 80),
+      routeId: item.routeId.slice(0, 80),
+      timestamp: createdAt,
+      status: 'pending_verification',
+      evidenceImage: typeof item.evidenceImage === 'string' ? item.evidenceImage.slice(0, 1_000_000) : 'video-frame-unavailable',
+      source: 'mobile_camera',
+      simulatedBoundingBoxes: Array.isArray(item.simulatedBoundingBoxes) ? item.simulatedBoundingBoxes.slice(0, 20) : [],
+      roadSurfaceMetric: typeof item.roadSurfaceMetric === 'string' ? item.roadSurfaceMetric.slice(0, 500) : undefined,
+      notes: typeof item.notes === 'string' ? item.notes.slice(0, 1000) : 'Imported from analyzed road video.',
+      history: [{
+        id: `H-${Date.now()}-${imported.length}`,
+        detectionId,
+        previousStatus: 'pending_verification',
+        newStatus: 'pending_verification',
+        timestamp: createdAt,
+        changedBy: user.name,
+        note: 'Imported from main-branch road video analysis.',
+      }],
+    };
+    imported.push(detection);
+  }
+
+  for (const detection of imported) persistDetection(detection);
+  detections = [...imported.reverse(), ...detections].slice(0, 200);
+  for (const detection of imported) {
+    broadcast('detection:new', { detection });
+  }
+  return res.status(201).json({ detections: imported });
+});
+
 app.post('/api/detections/:id/verify', (req, res) => {
-  const updated = updateIncidentStatus(req.params.id, 'verified', req.body.changedBy || 'Command Authority Officer');
+  const user = requireMainBranch(req, res);
+  if (!user) return;
+  const updated = updateIncidentStatus(req.params.id, 'verified', user.name);
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
 app.post('/api/detections/:id/reject', (req, res) => {
-  const updated = updateIncidentStatus(req.params.id, 'rejected', req.body.changedBy || 'Command Authority Officer', undefined, req.body.reason || 'False positive detection');
+  const user = requireMainBranch(req, res);
+  if (!user) return;
+  const updated = updateIncidentStatus(req.params.id, 'rejected', user.name, undefined, req.body.reason || 'False positive detection');
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
 app.post('/api/detections/:id/assign', (req, res) => {
-  const { department, changedBy, note } = req.body;
+  const user = requireMainBranch(req, res);
+  if (!user) return;
+  const { department, note } = req.body;
   if (!department) return res.status(400).json({ error: 'Department is required' });
-  const updated = updateIncidentStatus(req.params.id, 'assigned', changedBy || 'Authority Lead', department, note);
+  if (!DEPARTMENTS.includes(department as Department)) return res.status(400).json({ error: 'Choose a valid department.' });
+  const updated = updateIncidentStatus(req.params.id, 'assigned', user.name, department, note);
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
 app.post('/api/detections/:id/in-progress', (req, res) => {
-  const { changedBy, note } = req.body;
-  const updated = updateIncidentStatus(req.params.id, 'in_progress', changedBy || 'Field Crew Dispatcher', undefined, note || 'Field repair units mobilized on site');
+  const user = requireUser(req, res);
+  if (!user) return;
+  const detection = detections.find((item) => item.id === req.params.id);
+  if (!detection) return res.status(404).json({ error: 'Detection not found' });
+  if (user.role !== 'main' && (detection.department !== user.department || detection.status !== 'assigned')) {
+    return res.status(403).json({ error: 'You can only mobilize incidents assigned to your department.' });
+  }
+  const updated = updateIncidentStatus(req.params.id, 'in_progress', user.name, undefined, req.body.note || 'Field repair units mobilized on site');
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
 app.post('/api/detections/:id/resolve', (req, res) => {
-  const { changedBy, resolutionNotes } = req.body;
-  const updated = updateIncidentStatus(req.params.id, 'resolved', changedBy || 'Senior Civil Inspector', undefined, resolutionNotes || 'Pavement restored and inspected');
+  const user = requireUser(req, res);
+  if (!user) return;
+  const detection = detections.find((item) => item.id === req.params.id);
+  if (!detection) return res.status(404).json({ error: 'Detection not found' });
+  if (user.role !== 'main' && (detection.department !== user.department || detection.status !== 'in_progress')) {
+    return res.status(403).json({ error: 'You can only resolve incidents in progress for your department.' });
+  }
+  const updated = updateIncidentStatus(req.params.id, 'resolved', user.name, undefined, req.body.resolutionNotes || 'Pavement restored and inspected');
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
 // Routes
 app.get('/api/routes', (req, res) => {
+  if (!requireMainBranch(req, res)) return;
   res.json(INITIAL_ROUTES);
 });
 
 // Analytics
 app.get('/api/analytics', (req, res) => {
+  if (!requireMainBranch(req, res)) return;
   const byType: Record<string, number> = {
     pothole: 0,
     road_damage: 0,
@@ -772,6 +1193,7 @@ app.get('/api/analytics', (req, res) => {
 
 // System Health
 app.get('/api/system/health', (req, res) => {
+  if (!requireMainBranch(req, res)) return;
   const activeBuses = buses.filter(b => b.status === 'active').length;
   res.json({
     webSocketStatus: 'connected',
@@ -792,6 +1214,7 @@ app.get('/api/system/health', (req, res) => {
 
 // Simulation controls
 app.post('/api/simulation/control', async (req, res) => {
+  if (!requireMainBranch(req, res)) return;
   const { action, speed, busId, detectionType } = req.body;
   if (action === 'pause') {
     simulationRunning = false;

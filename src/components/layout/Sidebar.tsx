@@ -13,7 +13,8 @@ import {
   Zap,
   Info,
   Camera,
-  ScanSearch
+  ScanSearch,
+  UserRoundCog
 } from 'lucide-react';
 
 export type NavTab = 
@@ -28,7 +29,8 @@ export type NavTab =
   | 'analytics'
   | 'workflow'
   | 'health'
-  | 'privacy';
+  | 'privacy'
+  | 'authorities';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -36,6 +38,7 @@ interface SidebarProps {
   activeBusCount: number;
   pendingCount: number;
   criticalCount: number;
+  userRole: 'main' | 'department';
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -44,6 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeBusCount,
   pendingCount,
   criticalCount,
+  userRole,
 }) => {
   const navItems = [
     {
@@ -52,6 +56,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: LayoutDashboard,
       badge: null,
     },
+    ...(userRole === 'main' ? [{
+      id: 'authorities' as NavTab,
+      label: 'Authority Access',
+      icon: UserRoundCog,
+      badge: null,
+    }] : []),
     {
       id: 'live_camera' as NavTab,
       label: 'Live Camera',
@@ -129,6 +139,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-slate-100 text-slate-600',
     },
   ];
+  const visibleNavItems = userRole === 'main'
+    ? navItems
+    : navItems.filter((item) => ['workflow', 'incidents'].includes(item.id));
 
   return (
     <aside className="w-64 bg-white border-r border-slate-200 flex flex-col justify-between shrink-0 h-screen sticky top-0 shadow-xs z-20">
@@ -146,7 +159,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* Nav list */}
         <nav className="space-y-1">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
             return (

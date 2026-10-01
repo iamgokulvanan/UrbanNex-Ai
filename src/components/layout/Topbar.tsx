@@ -35,6 +35,8 @@ interface TopbarProps {
   searchResults: Array<{ id: string; label: string; detail: string; kind: 'bus' | 'detection' }>;
   onSelectSearchResult: (result: { id: string; kind: 'bus' | 'detection' }) => void;
   user: { name: string; email: string } | null;
+  userRole: 'main' | 'department';
+  userDepartment: string | null;
   onOpenAuth: (mode: 'login' | 'signup') => void;
   onLogout: () => void;
 }
@@ -54,6 +56,8 @@ export const Topbar: React.FC<TopbarProps> = ({
   searchResults,
   onSelectSearchResult,
   user,
+  userRole,
+  userDepartment,
   onOpenAuth,
   onLogout,
 }) => {
@@ -84,7 +88,7 @@ export const Topbar: React.FC<TopbarProps> = ({
         <div className="h-6 w-px bg-slate-200 hidden lg:block" />
 
         {/* Live Simulation Indicator */}
-        <div className="hidden shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs sm:flex">
+        <div className={`${userRole === 'main' ? 'sm:flex' : 'hidden'} hidden shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs`}>
           <span className="relative flex h-2.5 w-2.5">
             <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${simulation.isRunning ? 'bg-emerald-400 opacity-75' : 'bg-amber-400 opacity-75'}`}></span>
             <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${simulation.isRunning ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
@@ -101,7 +105,7 @@ export const Topbar: React.FC<TopbarProps> = ({
       {/* Center / Right: Demo Simulation Controls */}
       <div className="flex shrink-0 items-center gap-2 md:gap-3">
         {/* Simulation Control Bar */}
-        <div className="hidden xl:flex items-center gap-1.5 bg-slate-100/90 border border-slate-200 p-1 rounded-xl">
+        <div className={`${userRole === 'main' ? 'xl:flex' : 'hidden'} hidden items-center gap-1.5 bg-slate-100/90 border border-slate-200 p-1 rounded-xl`}>
           <button
             onClick={simulation.isRunning ? onPause : onResume}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
@@ -294,7 +298,7 @@ export const Topbar: React.FC<TopbarProps> = ({
                 </p>
                 <div className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[10px] font-semibold border border-emerald-200">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                  {user.name} · Municipal Commissioner Desk
+                  {userRole === 'main' ? 'Main Branch Authority' : userDepartment}
                 </div>
               </div>
               <div className="pt-2 text-xs text-slate-600 space-y-1.5">

@@ -12,10 +12,11 @@ import {
 import { INITIAL_BUSES, INITIAL_DETECTIONS, INITIAL_ROUTES } from '../data/seedData';
 
 export function useUrbanNexRealtime() {
-  const demoMode = typeof window !== 'undefined' && localStorage.getItem('urbannex-token')?.startsWith('urbannex-demo:');
-  const [buses, setBuses] = useState<Bus[]>(INITIAL_BUSES);
-  const [detections, setDetections] = useState<Detection[]>(INITIAL_DETECTIONS);
-  const [routes, setRoutes] = useState<RouteData[]>(INITIAL_ROUTES);
+  const sessionToken = typeof window !== 'undefined' ? localStorage.getItem('urbannex-token') : null;
+  const demoMode = sessionToken?.startsWith('urbannex-demo:') ?? false;
+  const [buses, setBuses] = useState<Bus[]>([]);
+  const [detections, setDetections] = useState<Detection[]>([]);
+  const [routes, setRoutes] = useState<RouteData[]>([]);
   const [selectedDetection, setSelectedDetection] = useState<Detection | null>(null);
   const [selectedBus, setSelectedBus] = useState<Bus | null>(null);
   
@@ -76,7 +77,8 @@ export function useUrbanNexRealtime() {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.host;
-      const wsUrl = `${protocol}//${host}/ws/live`;
+      if (!sessionToken || demoMode) return;
+      const wsUrl = `${protocol}//${host}/ws/live?token=${encodeURIComponent(sessionToken)}`;
 
       console.log('[UrbanNex Client] Connecting to WebSocket:', wsUrl);
       const ws = new WebSocket(wsUrl);
@@ -173,18 +175,20 @@ export function useUrbanNexRealtime() {
       console.error('[UrbanNex Client] WebSocket init failed:', e);
       reconnectTimeoutRef.current = setTimeout(connectWebSocket, 4000);
     }
-  }, [demoMode]);
+  }, [demoMode, sessionToken]);
 
   useEffect(() => {
     connectWebSocket();
 
     // Fallback initial fetch via REST
-    fetch('/api/buses')
+    if (!sessionToken || demoMode) return;
+    const headers = { Authorization: `Bearer ${sessionToken}` };
+    fetch('/api/buses', { headers })
       .then(r => r.json())
       .then(d => { if (d.buses) setBuses(d.buses); })
       .catch(() => {});
 
-    fetch('/api/detections')
+    fetch('/api/detections', { headers })
       .then(r => r.json())
       .then(d => { if (d.detections) setDetections(d.detections); })
       .catch(() => {});
@@ -193,51 +197,39 @@ export function useUrbanNexRealtime() {
       if (wsRef.current) wsRef.current.close();
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     };
-  }, [connectWebSocket]);
+  }, [connectWebSocket, demoMode, sessionToken]);
 
   // Send WS or REST commands
   const sendCommand = useCallback((cmd: any) => {
-    if (demoMode) {
-      if (cmd.action === 'pause' || cmd.action === 'resume') {
-        setSimulation(prev => ({ ...prev, isRunning: cmd.action === 'resume' }));
-      } else if (cmd.action === 'set_speed') {
-        setSimulation(prev => ({ ...prev, speed: cmd.speed }));
-      } else if (cmd.action === 'reset_demo') {
-        setBuses(INITIAL_BUSES);
-        setDetections(INITIAL_DETECTIONS);
-        setSimulation(prev => ({ ...prev, isRunning: true, speed: 1, totalEventsGenerated: INITIAL_DETECTIONS.length }));
-      } else if (cmd.action === 'trigger_detection') {
-        setSimulation(prev => ({ ...prev, totalEventsGenerated: prev.totalEventsGenerated + 1, lastEventTime: new Date().toLocaleTimeString() }));
-      }
-      return;
-    }
+    if (demoMode) return;
+    const headers = { 'Content-Type': 'application/json', ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) };
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(cmd));
     } else {
       // Fallback to REST API
       if (cmd.action === 'verify' && cmd.detectionId) {
-        fetch(`/api/detections/${cmd.detectionId}/verify`, { method: 'POST' }).catch(() => {});
+        fetch(`/api/detections/${cmd.detectionId}/verify`, { method: 'POST', headers }).catch(() => {});
       } else if (cmd.action === 'assign' && cmd.detectionId) {
         fetch(`/api/detections/${cmd.detectionId}/assign`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ department: cmd.department }),
         }).catch(() => {});
       } else if (cmd.action === 'resolve' && cmd.detectionId) {
         fetch(`/api/detections/${cmd.detectionId}/resolve`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ resolutionNotes: cmd.notes }),
         }).catch(() => {});
       } else {
         fetch('/api/simulation/control', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(cmd),
         }).catch(() => {});
       }
     }
-  }, [demoMode]);
+  }, [demoMode, sessionToken]);
 
   const verifyDetection = useCallback((id: string) => {
     // Optimistic update
@@ -249,10 +241,10 @@ export function useUrbanNexRealtime() {
     setDetections(prev => prev.map(d => d.id === id ? { ...d, status: 'rejected' as IncidentStatus } : d));
     fetch(`/api/detections/${id}/reject`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) },
       body: JSON.stringify({ reason }),
     }).catch(() => {});
-  }, []);
+  }, [sessionToken]);
 
   const assignDepartment = useCallback((id: string, department: Department, note?: string) => {
     setDetections(prev => prev.map(d => d.id === id ? { ...d, status: 'assigned' as IncidentStatus, department } : d));
@@ -263,10 +255,10 @@ export function useUrbanNexRealtime() {
     setDetections(prev => prev.map(d => d.id === id ? { ...d, status: 'in_progress' as IncidentStatus } : d));
     fetch(`/api/detections/${id}/in-progress`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) },
       body: JSON.stringify({ note }),
     }).catch(() => {});
-  }, []);
+  }, [sessionToken]);
 
   const resolveIncident = useCallback((id: string, notes?: string) => {
     setDetections(prev => prev.map(d => d.id === id ? { ...d, status: 'resolved' as IncidentStatus } : d));
