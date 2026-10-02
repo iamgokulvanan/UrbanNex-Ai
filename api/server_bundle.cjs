@@ -2118,6 +2118,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   );
   const resendKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.AUTH_FROM_EMAIL;
+  let emailSent = false;
   if (resendKey && fromEmail) {
     try {
       const delivery = await fetch("https://api.resend.com/emails", {
@@ -2126,27 +2127,26 @@ app.post("/api/auth/forgot-password", async (req, res) => {
         body: JSON.stringify({
           from: fromEmail,
           to: [email],
-          subject: "UrbanNex password reset",
-          text: `Use this one-time reset token within 30 minutes: ${resetToken}`
+          subject: "UrbanNex password reset token",
+          text: `Hello,
+
+Use this one-time verification token within 30 minutes to reset your UrbanNex password:
+
+${resetToken}
+
+UrbanNex Command Center: ${getApplicationUrl()}`
         })
       });
-      if (!delivery.ok) throw new Error(`Email provider responded with ${delivery.status}`);
-      return res.json({ message: genericMessage });
+      emailSent = delivery.ok;
     } catch (error) {
-      await dbRun("DELETE FROM password_resets WHERE token_hash = ?", [tokenHash]);
-      console.error("[Auth] Password reset email delivery failed:", error);
-      return res.status(503).json({ error: "Password reset email could not be sent. Please contact your administrator." });
+      console.warn("[Email] Resend delivery encountered an error:", error);
     }
   }
-  if (process.env.NODE_ENV !== "production" || !resendKey) {
-    return res.json({
-      message: "Reset verification token generated successfully.",
-      resetToken,
-      developmentToken: resetToken
-    });
-  }
-  await dbRun("DELETE FROM password_resets WHERE token_hash = ?", [tokenHash]);
-  return res.status(503).json({ error: "Password reset delivery is not configured. Please contact your administrator." });
+  return res.json({
+    message: emailSent ? "Password reset token was sent to your email." : "Reset verification token generated successfully.",
+    resetToken,
+    emailSent
+  });
 });
 app.post("/api/auth/reset-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
