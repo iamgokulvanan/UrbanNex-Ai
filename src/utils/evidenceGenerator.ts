@@ -1,4 +1,4 @@
-import { DetectionType } from '../types';
+import { DetectionType } from '../types/index.ts';
 
 /**
  * Generates an SVG data URI simulating an onboard bus camera evidence frame

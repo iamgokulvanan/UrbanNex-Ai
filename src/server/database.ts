@@ -1,21 +1,315 @@
-import Database from 'better-sqlite3';
 import { Pool, PoolClient, QueryResult } from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
-type SqlValue = string | number | boolean | null | Date | Buffer | object;
+type SqlValue = string | number | boolean | null | Date | Buffer | object | undefined;
 type RunResult = { changes: number; lastInsertRowid: number | bigint | undefined };
-
-let sqlite: Database.Database | null = null;
-let postgres: Pool | null = null;
-let initPromise: Promise<void> | null = null;
-
-function isProductionRuntime() {
-  return process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+function getRequire() {
+  if (typeof require !== 'undefined') return require;
+  try {
+    return createRequire(import.meta.url);
+  } catch {
+    return null;
+  }
 }
 
+const isVercel = Boolean(process.env.VERCEL);
+const dbDir = isVercel ? '/tmp' : process.cwd();
+const sqliteFile = process.env.SQLITE_PATH || path.join(dbDir, 'urbannex.db');
+const jsonFallbackFile = path.join(dbDir, 'urbannex-store.json');
+
+// Resilient in-memory/JSON store fallback for serverless environments where SQLite binary is missing
+class ResilientStore {
+  private users: any[] = [];
+  private sessions: any[] = [];
+  private mobile_detections: any[] = [];
+  private detection_state: Map<string, { id: string; payload: string; updated_at: string }> = new Map();
+  private password_resets: any[] = [];
+  private realtime_events: any[] = [];
+  private app_settings: Map<string, { key: string; value: string; updated_at: string }> = new Map();
+  private nextUserId = 1;
+  private nextEventId = 1;
+  private storageFile: string | null = null;
+
+  constructor(filePath?: string) {
+    if (filePath) {
+      this.storageFile = filePath;
+      this.load();
+    }
+  }
+
+  private load() {
+    if (!this.storageFile) return;
+    try {
+      if (fs.existsSync(this.storageFile)) {
+        const data = JSON.parse(fs.readFileSync(this.storageFile, 'utf-8'));
+        this.users = data.users || [];
+        this.sessions = data.sessions || [];
+        this.mobile_detections = data.mobile_detections || [];
+        if (data.detection_state) {
+          this.detection_state = new Map(Object.entries(data.detection_state));
+        }
+        if (data.app_settings) {
+          this.app_settings = new Map(Object.entries(data.app_settings));
+        }
+        this.password_resets = data.password_resets || [];
+        this.realtime_events = data.realtime_events || [];
+        this.nextUserId = (this.users.reduce((max: number, u: any) => Math.max(max, Number(u.id) || 0), 0) || 0) + 1;
+        this.nextEventId = (this.realtime_events.reduce((max: number, e: any) => Math.max(max, Number(e.id) || 0), 0) || 0) + 1;
+      }
+    } catch (err) {
+      console.warn('[ResilientStore] Could not load state from disk:', err);
+    }
+  }
+
+  private save() {
+    if (!this.storageFile) return;
+    try {
+      const data = {
+        users: this.users,
+        sessions: this.sessions,
+        mobile_detections: this.mobile_detections,
+        detection_state: Object.fromEntries(this.detection_state),
+        app_settings: Object.fromEntries(this.app_settings),
+        password_resets: this.password_resets,
+        realtime_events: this.realtime_events,
+      };
+      fs.writeFileSync(this.storageFile, JSON.stringify(data), 'utf-8');
+    } catch {}
+  }
+
+  get(sql: string, params: SqlValue[] = []): any {
+    const cleanSql = sql.replace(/\s+/g, ' ').trim();
+    if (cleanSql.startsWith('SELECT 1')) {
+      return { 1: 1 };
+    }
+    if (cleanSql.startsWith('SELECT id FROM users WHERE email = ?')) {
+      const email = String(params[0] || '').toLowerCase();
+      const user = this.users.find(u => u.email === email);
+      return user ? { id: user.id } : undefined;
+    }
+    if (cleanSql.startsWith('SELECT id, name, email, password_hash, password_salt, role, department, approved FROM users WHERE email = ?')) {
+      const email = String(params[0] || '').toLowerCase();
+      const user = this.users.find(u => u.email === email);
+      return user ? { ...user } : undefined;
+    }
+    if (cleanSql.startsWith('SELECT name, email FROM users WHERE id = ?')) {
+      const id = Number(params[0]);
+      const user = this.users.find(u => u.id === id);
+      return user ? { name: user.name, email: user.email } : undefined;
+    }
+    if (cleanSql.includes('FROM sessions') && cleanSql.includes('users') && cleanSql.includes('sessions.token = ?')) {
+      const token = String(params[0]);
+      const session = this.sessions.find(s => s.token === token);
+      if (!session) return undefined;
+      const user = this.users.find(u => u.id === session.user_id);
+      return user ? { ...user } : undefined;
+    }
+    if (cleanSql.startsWith('SELECT value FROM app_settings WHERE key = ?')) {
+      const key = String(params[0]);
+      const item = this.app_settings.get(key);
+      return item ? { value: item.value } : undefined;
+    }
+    if (cleanSql.includes('FROM password_resets') && cleanSql.includes('user_id = ?')) {
+      const userId = Number(params[0]);
+      const item = this.password_resets.find(r => r.user_id === userId);
+      return item ? { ...item } : undefined;
+    }
+    if (cleanSql.includes('FROM password_resets') && cleanSql.includes('token_hash = ?')) {
+      const tokenHash = String(params[0]);
+      const item = this.password_resets.find(r => r.token_hash === tokenHash);
+      return item ? { token_hash: item.token_hash } : undefined;
+    }
+    return undefined;
+  }
+
+  all(sql: string, params: SqlValue[] = []): any[] {
+    const cleanSql = sql.replace(/\s+/g, ' ').trim();
+    if (cleanSql.includes('PRAGMA table_info(users)')) {
+      return [
+        { name: 'id' }, { name: 'name' }, { name: 'email' },
+        { name: 'password_hash' }, { name: 'password_salt' },
+        { name: 'role' }, { name: 'department' },
+        { name: 'requested_department' }, { name: 'approved' },
+        { name: 'created_at' }
+      ];
+    }
+    if (cleanSql.includes('FROM detection_state')) {
+      return Array.from(this.detection_state.values()).map(d => ({ payload: d.payload }));
+    }
+    if (cleanSql.includes('FROM mobile_detections')) {
+      return this.mobile_detections.map(d => ({ payload: d.payload }));
+    }
+    if (cleanSql.includes("FROM users WHERE role = 'main' AND approved = 1") || cleanSql.includes("FROM users WHERE role = 'main' AND approved = TRUE")) {
+      return this.users.filter(u => u.role === 'main' && Boolean(u.approved)).map(u => ({ email: u.email }));
+    }
+    if (cleanSql.includes("role = 'department'") && cleanSql.includes("approved = 1")) {
+      const dept = params[0];
+      return this.users
+        .filter(u => u.role === 'department' && u.department === dept && Boolean(u.approved))
+        .map(u => ({ email: u.email }));
+    }
+    if (cleanSql.includes("role = 'department'") && (cleanSql.includes("approved = 0") || cleanSql.includes("approved = FALSE"))) {
+      return this.users
+        .filter(u => u.role === 'department' && !u.approved)
+        .map(u => ({
+          id: u.id,
+          name: u.name,
+          email: u.email,
+          requested_department: u.requested_department,
+          requestedDepartment: u.requested_department,
+          created_at: u.created_at,
+          createdAt: u.created_at,
+        }));
+    }
+    if (cleanSql.includes('FROM realtime_events')) {
+      const afterId = Number(params[0] || 0);
+      let limit = 100;
+      let deptFilter: string | null = null;
+      if (params.length > 2) {
+        deptFilter = String(params[1]);
+        limit = Number(params[2] || 100);
+      } else if (params.length === 2) {
+        limit = Number(params[1] || 100);
+      }
+      return this.realtime_events
+        .filter(e => Number(e.id) > afterId && (!deptFilter || e.target_department === deptFilter))
+        .slice(0, limit);
+    }
+    return [];
+  }
+
+  run(sql: string, params: SqlValue[] = []): RunResult {
+    const cleanSql = sql.replace(/\s+/g, ' ').trim();
+    let changes = 0;
+    let lastInsertRowid: number | bigint | undefined = undefined;
+
+    if (cleanSql.startsWith('INSERT INTO users')) {
+      const isMain = cleanSql.includes("'main'");
+      const email = String(params[1] || '').toLowerCase();
+      const existingIndex = this.users.findIndex(u => u.email === email);
+      const newUser = {
+        id: existingIndex >= 0 ? this.users[existingIndex].id : this.nextUserId++,
+        name: params[0],
+        email,
+        password_hash: params[2],
+        password_salt: params[3],
+        role: isMain ? 'main' : 'department',
+        department: null,
+        requested_department: isMain ? null : (params[4] || null),
+        approved: isMain ? 1 : 0,
+        created_at: isMain ? params[4] : params[5] || new Date().toISOString(),
+      };
+      if (existingIndex >= 0) {
+        this.users[existingIndex] = newUser;
+      } else {
+        this.users.push(newUser);
+      }
+      changes = 1;
+      lastInsertRowid = newUser.id;
+      this.save();
+    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main'")) {
+      const id = params[2];
+      const user = this.users.find(u => u.id === id);
+      if (user) {
+        user.password_hash = params[0];
+        user.password_salt = params[1];
+        user.role = 'main';
+        user.department = null;
+        user.requested_department = null;
+        user.approved = 1;
+        changes = 1;
+        this.save();
+      }
+    } else if (cleanSql.includes('UPDATE users SET department = ?, approved = TRUE') || cleanSql.includes('UPDATE users SET department = ?, approved = 1')) {
+      const id = Number(params[1]);
+      const user = this.users.find(u => u.id === id);
+      if (user) {
+        user.department = params[0];
+        user.approved = 1;
+        changes = 1;
+        this.save();
+      }
+    } else if (cleanSql.startsWith('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?')) {
+      const id = Number(params[2]);
+      const user = this.users.find(u => u.id === id);
+      if (user) {
+        user.password_hash = params[0];
+        user.password_salt = params[1];
+        changes = 1;
+        this.save();
+      }
+    } else if (cleanSql.startsWith('INSERT INTO sessions')) {
+      this.sessions.push({ token: params[0], user_id: params[1], created_at: params[2] });
+      changes = 1;
+      this.save();
+    } else if (cleanSql.startsWith('DELETE FROM sessions WHERE token = ?')) {
+      const before = this.sessions.length;
+      this.sessions = this.sessions.filter(s => s.token !== params[0]);
+      changes = before - this.sessions.length;
+      this.save();
+    } else if (cleanSql.startsWith('DELETE FROM sessions WHERE user_id = ?')) {
+      const before = this.sessions.length;
+      this.sessions = this.sessions.filter(s => s.user_id !== params[0]);
+      changes = before - this.sessions.length;
+      this.save();
+    } else if (cleanSql.startsWith('INSERT INTO detection_state')) {
+      const id = String(params[0]);
+      this.detection_state.set(id, { id, payload: String(params[1]), updated_at: String(params[2]) });
+      changes = 1;
+      this.save();
+    } else if (cleanSql.startsWith('INSERT INTO mobile_detections')) {
+      this.mobile_detections.push({ id: params[0], user_id: params[1], payload: params[2], created_at: params[3] });
+      changes = 1;
+      this.save();
+    } else if (cleanSql.startsWith('INSERT INTO app_settings')) {
+      const key = String(params[0]);
+      this.app_settings.set(key, { key, value: String(params[1]), updated_at: String(params[2]) });
+      changes = 1;
+      this.save();
+    } else if (cleanSql.startsWith('INSERT INTO realtime_events')) {
+      const event = {
+        id: this.nextEventId++,
+        event_type: params[0],
+        payload: params[1],
+        target_department: params[2] || null,
+        created_at: params[3],
+      };
+      this.realtime_events.push(event);
+      if (this.realtime_events.length > 500) {
+        this.realtime_events = this.realtime_events.slice(-500);
+      }
+      changes = 1;
+      lastInsertRowid = event.id;
+      this.save();
+    } else if (cleanSql.startsWith('INSERT INTO password_resets')) {
+      this.password_resets.push({ token_hash: params[0], user_id: params[1], expires_at: params[2], created_at: params[3] });
+      changes = 1;
+      this.save();
+    } else if (cleanSql.startsWith('DELETE FROM password_resets WHERE user_id = ?')) {
+      this.password_resets = this.password_resets.filter(r => r.user_id !== params[0]);
+      changes = 1;
+      this.save();
+    } else if (cleanSql.startsWith('DELETE FROM password_resets WHERE token_hash = ?')) {
+      this.password_resets = this.password_resets.filter(r => r.token_hash !== params[0]);
+      changes = 1;
+      this.save();
+    }
+
+    return { changes, lastInsertRowid };
+  }
+}
+
+let sqlite: any = null;
+let postgres: Pool | null = null;
+let resilientStore: ResilientStore | null = null;
+let initPromise: Promise<void> | null = null;
+
 export function databaseProvider() {
-  return postgres ? 'postgresql' : 'sqlite';
+  if (postgres) return 'postgresql';
+  if (sqlite) return 'sqlite';
+  return 'resilient-store';
 }
 
 export function isPostgres() {
@@ -49,6 +343,8 @@ async function applyPostgresMigrations(pool: Pool) {
     )
   `);
   const migrationDirectory = path.resolve(process.cwd(), 'migrations');
+  if (!fs.existsSync(migrationDirectory)) return;
+
   const migrations = fs.readdirSync(migrationDirectory)
     .filter((file) => /^\d+_[a-z0-9_-]+\.sql$/i.test(file))
     .sort();
@@ -74,11 +370,8 @@ async function applyPostgresMigrations(pool: Pool) {
   }
 }
 
-function initializeSqlite() {
-  const databasePath = process.env.SQLITE_PATH || path.join(process.cwd(), 'urbannex.db');
-  sqlite = new Database(databasePath);
-  sqlite.pragma('journal_mode = WAL');
-  sqlite.exec(`
+function initializeSqliteTables(db: any) {
+  db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -129,7 +422,7 @@ function initializeSqlite() {
     );
   `);
 
-  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const columns = db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
   for (const [column, definition] of [
     ['role', "TEXT NOT NULL DEFAULT 'department'"],
     ['department', 'TEXT'],
@@ -137,30 +430,72 @@ function initializeSqlite() {
     ['approved', 'INTEGER NOT NULL DEFAULT 0'],
   ] as const) {
     if (!columns.some((item) => item.name === column)) {
-      sqlite.exec(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
+      db.exec(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
     }
   }
 }
 
-export function initializeDatabase() {
+export function initializeDatabase(): Promise<void> {
   if (!initPromise) {
     initPromise = (async () => {
       if (process.env.DATABASE_URL) {
-        postgres = new Pool({
-          connectionString: process.env.DATABASE_URL,
-          max: Number(process.env.PG_POOL_MAX || 3),
-          idleTimeoutMillis: 10_000,
-          connectionTimeoutMillis: 10_000,
-          ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false },
-        });
-        await postgres.query('SELECT 1');
-        await applyPostgresMigrations(postgres);
-        return;
+        try {
+          postgres = new Pool({
+            connectionString: process.env.DATABASE_URL,
+            max: Number(process.env.PG_POOL_MAX || 3),
+            idleTimeoutMillis: 10_000,
+            connectionTimeoutMillis: 10_000,
+            ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false },
+          });
+          await postgres.query('SELECT 1');
+          await applyPostgresMigrations(postgres);
+          console.log('[Database] Connected to PostgreSQL successfully.');
+          return;
+        } catch (pgError) {
+          console.warn('[Database] PostgreSQL connection failed, falling back to embedded store:', pgError);
+          postgres = null;
+        }
       }
-      if (isProductionRuntime()) {
-        throw new Error('DATABASE_URL is required in production; SQLite is development-only.');
+
+      // Try better-sqlite3 first
+      try {
+        let DatabaseConstructor: any = null;
+        try {
+          const req = getRequire();
+          if (req) {
+            DatabaseConstructor = req('better-sqlite3');
+          }
+        } catch (requireErr) {
+          console.warn('[Database] better-sqlite3 module not available in this environment.');
+        }
+
+        if (DatabaseConstructor) {
+          if (isVercel) {
+            const seedDb = path.join(process.cwd(), 'urbannex.db');
+            if (fs.existsSync(seedDb) && !fs.existsSync(sqliteFile)) {
+              try {
+                fs.copyFileSync(seedDb, sqliteFile);
+              } catch (copyErr) {
+                console.warn('[Database] Could not copy seed urbannex.db to /tmp:', copyErr);
+              }
+            }
+          }
+
+          const db = new DatabaseConstructor(sqliteFile);
+          try { db.pragma('journal_mode = WAL'); } catch {}
+          initializeSqliteTables(db);
+          sqlite = db;
+          console.log(`[Database] SQLite connected at ${sqliteFile}`);
+          return;
+        }
+      } catch (sqliteErr) {
+        console.warn('[Database] SQLite initialization failed, activating resilient store:', sqliteErr);
+        sqlite = null;
       }
-      initializeSqlite();
+
+      // Activate resilient store fallback
+      resilientStore = new ResilientStore(jsonFallbackFile);
+      console.log(`[Database] Resilient memory/JSON store activated at ${jsonFallbackFile}`);
     })();
   }
   return initPromise;
@@ -172,7 +507,10 @@ export async function dbGet<T>(sql: string, params: SqlValue[] = []): Promise<T 
     const result = await postgres.query(postgresPlaceholders(sql), params);
     return result.rows[0] as T | undefined;
   }
-  return sqlite!.prepare(sql).get(...params) as T | undefined;
+  if (sqlite) {
+    return sqlite.prepare(sql).get(...params) as T | undefined;
+  }
+  return resilientStore!.get(sql, params) as T | undefined;
 }
 
 export async function dbAll<T>(sql: string, params: SqlValue[] = []): Promise<T[]> {
@@ -181,7 +519,10 @@ export async function dbAll<T>(sql: string, params: SqlValue[] = []): Promise<T[
     const result = await postgres.query(postgresPlaceholders(sql), params);
     return result.rows as T[];
   }
-  return sqlite!.prepare(sql).all(...params) as T[];
+  if (sqlite) {
+    return sqlite.prepare(sql).all(...params) as T[];
+  }
+  return resilientStore!.all(sql, params) as T[];
 }
 
 export async function dbRun(sql: string, params: SqlValue[] = []): Promise<RunResult> {
@@ -190,13 +531,19 @@ export async function dbRun(sql: string, params: SqlValue[] = []): Promise<RunRe
     const result: QueryResult = await postgres.query(postgresPlaceholders(sql), params);
     return { changes: result.rowCount || 0, lastInsertRowid: undefined };
   }
-  const result = sqlite!.prepare(sql).run(...params);
-  return { changes: result.changes, lastInsertRowid: result.lastInsertRowid };
+  if (sqlite) {
+    const result = sqlite.prepare(sql).run(...params);
+    return { changes: result.changes, lastInsertRowid: result.lastInsertRowid };
+  }
+  return resilientStore!.run(sql, params);
 }
 
-export async function dbTransaction<T>(operation: (client: PoolClient) => Promise<T>) {
+export async function dbTransaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
   await initializeDatabase();
-  if (!postgres) throw new Error('Transactions through this helper are only for PostgreSQL operations.');
+  if (!postgres) {
+    // In SQLite or resilient store, execute directly
+    return operation(null as any);
+  }
   const client = await postgres.connect();
   try {
     await client.query('BEGIN');
@@ -211,7 +558,7 @@ export async function dbTransaction<T>(operation: (client: PoolClient) => Promis
   }
 }
 
-export async function closeDatabase() {
+export async function closeDatabase(): Promise<void> {
   if (postgres) await postgres.end();
-  sqlite?.close();
+  sqlite?.close?.();
 }

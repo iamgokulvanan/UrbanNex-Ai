@@ -1,4 +1,4 @@
-import { Bus, Detection, RouteData, Department } from '../types';
+import { Bus, Detection, RouteData, Department } from '../types/index.ts';
 
 export const CITY_CENTER: [number, number] = [11.0168, 76.9558]; // Coimbatore / Gandhipuram
 

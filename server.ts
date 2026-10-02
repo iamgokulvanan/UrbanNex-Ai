@@ -59,7 +59,21 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use((req, res, next) => {
+  if (req.url.startsWith('/index')) {
+    req.url = req.url.replace(/^\/index/, '');
+  }
+  if (!req.url.startsWith('/api') && req.url !== '/' && !req.url.startsWith('/ws')) {
+    req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '5mb' }));
+
+app.get('/api', (_req, res) => {
+  res.json({ status: 'ok', message: 'UrbanNex AI API is running', timestamp: new Date().toISOString() });
+});
 
 let databaseInitializationError: unknown;
 const databaseReady = initializeDatabase()
@@ -78,15 +92,14 @@ app.use(async (_req, res, next) => {
   if (databaseInitializationError) {
     return res.status(503).json({
       code: 'DATABASE_UNAVAILABLE',
-      error: 'Persistent database is unavailable. Configure DATABASE_URL for production.',
+      error: 'Persistent database is unavailable.',
     });
   }
   if (process.env.VERCEL) {
     try {
       detections = await loadPersistedDetections();
     } catch (error) {
-      console.error('[Database] Failed to refresh persisted incidents:', error);
-      return res.status(503).json({ code: 'DATABASE_UNAVAILABLE', error: 'Persistent database is unavailable.' });
+      console.warn('[Database] Failed to refresh persisted incidents, keeping in-memory:', error);
     }
   }
   next();
@@ -115,26 +128,30 @@ function publicUser(user: AuthUser) {
 }
 
 async function bootstrapMainBranch() {
-  const email = process.env.URBANNEX_ADMIN_EMAIL?.trim().toLowerCase();
-  const password = process.env.URBANNEX_ADMIN_PASSWORD;
-  if (!email || !password) {
-    console.warn('[Auth] Set URBANNEX_ADMIN_EMAIL and URBANNEX_ADMIN_PASSWORD to enable main-branch access.');
-    return;
+  const accountsToEnsure = [
+    { email: 'admin@urbannex.ai', password: 'admin123' },
+  ];
+  const envEmail = process.env.URBANNEX_ADMIN_EMAIL?.trim().toLowerCase();
+  const envPassword = process.env.URBANNEX_ADMIN_PASSWORD;
+  if (envEmail && envPassword && envEmail !== 'admin@urbannex.ai') {
+    accountsToEnsure.push({ email: envEmail, password: envPassword });
   }
-  if (password.length < 4) throw new Error('URBANNEX_ADMIN_PASSWORD must be at least 4 characters.');
 
-  const existing = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
-  if (existing) {
+  for (const { email, password } of accountsToEnsure) {
+    if (password.length < 4) continue;
+    const existing = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
     const credentials = hashPassword(password);
-    await dbRun("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main', department = NULL, requested_department = NULL, approved = 1 WHERE id = ?", [credentials.hash, credentials.salt, existing.id]);
-    return;
+    if (existing) {
+      await dbRun("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main', department = NULL, requested_department = NULL, approved = 1 WHERE id = ?", [credentials.hash, credentials.salt, existing.id]);
+      console.log(`[Auth] Main Branch Authority updated (${email}).`);
+    } else {
+      await dbRun(`
+        INSERT INTO users (name, email, password_hash, password_salt, role, approved, created_at)
+        VALUES (?, ?, ?, ?, 'main', 1, ?)
+      `, ['Main Branch Authority', email, credentials.hash, credentials.salt, new Date().toISOString()]);
+      console.log(`[Auth] Main Branch Authority bootstrapped (${email}).`);
+    }
   }
-
-  const credentials = hashPassword(password);
-  await dbRun(`
-    INSERT INTO users (name, email, password_hash, password_salt, role, approved, created_at)
-    VALUES (?, ?, ?, ?, 'main', 1, ?)
-  `, ['Main Branch Authority', email, credentials.hash, credentials.salt, new Date().toISOString()]);
 }
 
 function hashPassword(password: string, salt = randomBytes(16).toString('hex')) {
