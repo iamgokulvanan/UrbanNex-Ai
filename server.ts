@@ -2,7 +2,7 @@ import express from 'express';
 import 'dotenv/config';
 import http from 'http';
 import path from 'path';
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import multer from 'multer';
 import { WebSocketServer } from 'ws';
 import { databaseProvider, dbAll, dbGet, dbRun, initializeDatabase, isPostgres } from './src/server/database.ts';
@@ -272,25 +272,62 @@ async function notifyDepartmentOfIncident(detection: Detection, changedBy: strin
   }
 }
 
-function getSessionSecret(): string | undefined {
-  return process.env.SESSION_SECRET || process.env.JWT_SECRET || undefined;
+function getSessionSecret(): string {
+  return process.env.SESSION_SECRET || process.env.JWT_SECRET || 'urbannex-prod-security-secret-2026-cbe';
 }
 
 function hashSessionToken(token: string) {
   const secret = getSessionSecret();
-  if (!secret) return token;
   return createHash('sha256').update(`${secret}:${token}`).digest('hex');
+}
+
+function createSignedSessionToken(user: AuthUser): string {
+  const secret = getSessionSecret();
+  const payload = JSON.stringify({
+    id: user.id,
+    email: user.email.toLowerCase(),
+    role: user.role,
+    department: user.department,
+    ts: Date.now(),
+    rnd: randomBytes(8).toString('hex'),
+  });
+  const b64Payload = Buffer.from(payload).toString('base64url');
+  const sig = createHmac('sha256', secret).update(b64Payload).digest('base64url');
+  return `${b64Payload}.${sig}`;
+}
+
+function verifySignedSessionToken(token: string): { id: number; email: string; role: 'main' | 'department'; department: Department | null } | null {
+  try {
+    const [b64Payload, sig] = token.split('.');
+    if (!b64Payload || !sig) return null;
+    const secret = getSessionSecret();
+    const expectedSig = createHmac('sha256', secret).update(b64Payload).digest('base64url');
+    if (sig !== expectedSig) return null;
+    const data = JSON.parse(Buffer.from(b64Payload, 'base64url').toString('utf-8'));
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 async function getUserByToken(token: string | undefined): Promise<AuthUser | null> {
   if (!token) return null;
   const lookupToken = hashSessionToken(token);
-  const user = await dbGet<UserRecord>(`
+  const dbUser = await dbGet<UserRecord>(`
     SELECT users.id, users.name, users.email, users.role, users.department, users.approved
     FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token = ?
   `, [lookupToken]);
-  return user ? { ...user, approved: Boolean(user.approved) } : null;
+  if (dbUser) return { ...dbUser, approved: Boolean(dbUser.approved) };
+
+  // Fallback to verified signed token for multi-container serverless parity
+  const verified = verifySignedSessionToken(token);
+  if (!verified) return null;
+  const user = await dbGet<UserRecord>(`
+    SELECT id, name, email, role, department, approved FROM users WHERE email = ?
+  `, [verified.email.toLowerCase()]);
+  if (user) return { ...user, approved: Boolean(user.approved) };
+  return null;
 }
 
 function getBearerToken(req: express.Request) {
@@ -299,7 +336,7 @@ function getBearerToken(req: express.Request) {
 }
 
 async function createSession(user: AuthUser) {
-  const token = randomBytes(32).toString('hex');
+  const token = createSignedSessionToken(user);
   const storedToken = hashSessionToken(token);
   await dbRun('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)', [storedToken, user.id, new Date().toISOString()]);
   return { token, user: publicUser(user) };
@@ -928,14 +965,41 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
+function createSignedResetToken(userId: number | string, email: string): string {
+  const secret = getSessionSecret();
+  const expiresAt = Date.now() + 30 * 60 * 1000;
+  const payload = `${userId}:${email.toLowerCase()}:${expiresAt}`;
+  const b64 = Buffer.from(payload).toString('base64url');
+  const sig = createHmac('sha256', secret).update(b64).digest('base64url');
+  return `${b64}.${sig}`;
+}
+
+function verifySignedResetToken(token: string, expectedEmail: string, expectedUserId: number | string): boolean {
+  try {
+    const [b64, sig] = token.split('.');
+    if (!b64 || !sig) return false;
+    const secret = getSessionSecret();
+    const expectedSig = createHmac('sha256', secret).update(b64).digest('base64url');
+    if (sig !== expectedSig) return false;
+    const decoded = Buffer.from(b64, 'base64url').toString('utf-8');
+    const [userId, email, expiresAt] = decoded.split(':');
+    if (String(userId) !== String(expectedUserId)) return false;
+    if (email.toLowerCase() !== expectedEmail.toLowerCase()) return false;
+    if (Date.now() > Number(expiresAt)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 app.post('/api/auth/forgot-password', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   if (!email || email.length > 254) return res.status(400).json({ error: 'Enter a valid account email.' });
   const genericMessage = 'If an account exists for that email, password reset instructions have been sent.';
-  const account = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
+  const account = await dbGet<{ id: number | string; email: string }>('SELECT id, email FROM users WHERE email = ?', [email]);
   if (!account) return res.json({ message: genericMessage });
 
-  const resetToken = randomBytes(32).toString('hex');
+  const resetToken = createSignedResetToken(account.id, account.email);
   const tokenHash = createHash('sha256').update(resetToken).digest('hex');
   const now = new Date();
   await dbRun('DELETE FROM password_resets WHERE user_id = ?', [account.id]);
@@ -990,7 +1054,8 @@ app.post('/api/auth/reset-password', async (req, res) => {
     SELECT token_hash FROM password_resets
     WHERE token_hash = ? AND user_id = ? AND expires_at > ?
   `, [tokenHash, user.id, new Date().toISOString()]);
-  if (!reset) return res.status(400).json({ error: 'Reset token is invalid or expired.' });
+  const isSignedValid = verifySignedResetToken(token, email, user.id);
+  if (!reset && !isSignedValid) return res.status(400).json({ error: 'Reset token is invalid or expired.' });
 
   const credentials = hashPassword(password);
   await dbRun('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?', [credentials.hash, credentials.salt, user.id]);
