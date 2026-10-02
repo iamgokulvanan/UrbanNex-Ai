@@ -64,7 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }] : []),
     {
       id: 'real_video' as NavTab,
-      label: 'AI Video & Image Analyzer',
+      label: 'AI Analyzer',
       icon: ScanSearch,
       badge: 'AI Vision',
       badgeColor: 'bg-emerald-100 text-emerald-700',

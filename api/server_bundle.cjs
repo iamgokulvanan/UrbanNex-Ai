@@ -2270,6 +2270,10 @@ app.post("/api/detections/import-video", async (req, res) => {
       return res.status(400).json({ error: "Video analysis contains an invalid detection record." });
     }
     const detectionId = `VID-${(/* @__PURE__ */ new Date()).getUTCFullYear()}-${(0, import_node_crypto.randomBytes)(6).toString("hex").toUpperCase()}`;
+    const incomingStatus = ["pending_verification", "verified", "assigned", "in_progress", "resolved"].includes(item.status) ? item.status : "pending_verification";
+    const incomingDept = item.department && DEPARTMENTS.includes(item.department) ? item.department : void 0;
+    const finalStatus = incomingDept ? incomingStatus === "pending_verification" ? "assigned" : incomingStatus : incomingStatus;
+    const assignedTo = typeof item.assignedTo === "string" ? item.assignedTo.slice(0, 120) : void 0;
     const detection = {
       id: detectionId,
       type: item.type,
@@ -2281,20 +2285,22 @@ app.post("/api/detections/import-video", async (req, res) => {
       busId: item.busId.slice(0, 80),
       routeId: item.routeId.slice(0, 80),
       timestamp: createdAt,
-      status: "pending_verification",
+      status: finalStatus,
+      department: incomingDept,
+      assignedTo,
       evidenceImage: typeof item.evidenceImage === "string" ? item.evidenceImage.slice(0, 1e6) : "video-frame-unavailable",
       source: "mobile_camera",
       simulatedBoundingBoxes: Array.isArray(item.simulatedBoundingBoxes) ? item.simulatedBoundingBoxes.slice(0, 20) : [],
       roadSurfaceMetric: typeof item.roadSurfaceMetric === "string" ? item.roadSurfaceMetric.slice(0, 500) : void 0,
-      notes: typeof item.notes === "string" ? item.notes.slice(0, 1e3) : "Imported from analyzed road video.",
+      notes: typeof item.notes === "string" ? item.notes.slice(0, 1e3) : incomingDept ? `Work order assigned to ${incomingDept}.` : "Imported from AI Analyzer.",
       history: [{
         id: `H-${Date.now()}-${imported.length}`,
         detectionId,
         previousStatus: "pending_verification",
-        newStatus: "pending_verification",
+        newStatus: finalStatus,
         timestamp: createdAt,
-        changedBy: user.name,
-        note: "Imported from main-branch road video analysis."
+        changedBy: assignedTo ? `Authority Dispatch (${assignedTo})` : user.name,
+        note: typeof item.notes === "string" ? item.notes.slice(0, 1e3) : incomingDept ? `Work order assigned to ${incomingDept}.` : "Imported from AI Analyzer."
       }]
     };
     imported.push(detection);

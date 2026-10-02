@@ -284,7 +284,14 @@ export default function App() {
     frame?: number;
     timestamp?: number;
     frame_image?: string;
-  }>, videoName?: string) => {
+    locationName?: string;
+    latitude?: number;
+    longitude?: number;
+    department?: Department;
+    status?: IncidentStatus;
+    assignedTo?: string;
+    notes?: string;
+  }>, mediaName?: string, options?: { targetTab?: NavTab }) => {
     const mapToSeverity = (type: DetectionType = 'pothole', confidence = 0.9) => {
       if (type === 'waterlogging') return confidence > 0.9 ? 'critical' : 'high';
       if (type === 'pedestrian_risk') return confidence > 0.94 ? 'critical' : 'medium';
@@ -308,21 +315,24 @@ export default function App() {
         const resolvedType = (detection.type ?? detection.class ?? 'pothole') as DetectionType;
         const confidence = detection.confidence ?? 0.9;
         const bbox = detection.bbox ?? {};
-        const detectionId = `DET-VIDEO-${Date.now()}-${index + 1}`;
+        const detectionId = `DET-AI-${Date.now()}-${index + 1}`;
         const createdAt = new Date().toISOString();
+        const initialStatus = detection.status || (detection.department ? 'assigned' : 'pending_verification');
 
         return {
           id: detectionId,
           type: resolvedType,
           confidence,
           severity: detection.severity ?? mapToSeverity(resolvedType, confidence),
-          latitude: fallbackBus.latitude + (index + 1) * 0.0002,
-          longitude: fallbackBus.longitude + (index + 1) * 0.00015,
-          locationName: videoName ? `Uploaded video analysis · ${videoName}` : 'Uploaded video analysis',
+          latitude: detection.latitude ?? (fallbackBus.latitude + (index + 1) * 0.0002),
+          longitude: detection.longitude ?? (fallbackBus.longitude + (index + 1) * 0.00015),
+          locationName: detection.locationName || (mediaName ? `AI Analysis · ${mediaName}` : 'AI Analysis Detection'),
           busId: fallbackBus.id,
           routeId: fallbackBus.routeId,
           timestamp: createdAt,
-          status: 'pending_verification',
+          status: initialStatus,
+          department: detection.department,
+          assignedTo: detection.assignedTo,
           evidenceImage: detection.frame_image || 'simulated_pothole_01',
           source: 'mobile_camera',
           simulatedBoundingBoxes: [{
@@ -333,35 +343,45 @@ export default function App() {
             label: resolvedType,
             confidence,
           }],
-          roadSurfaceMetric: `Video upload classification (${resolvedType.replace('_', ' ')})`,
-          notes: `Imported from uploaded road video evidence${videoName ? ` (${videoName})` : ''}. Detected issue: ${resolvedType.replace('_', ' ')}.`,
+          roadSurfaceMetric: `AI classification (${resolvedType.replace('_', ' ')})`,
+          notes: detection.notes || `Detected from ${mediaName || 'AI Analyzer'}. Type: ${resolvedType.replace('_', ' ')}.`,
           history: [{
             id: `H-${Date.now()}-${index}`,
             detectionId,
             previousStatus: 'pending_verification',
-            newStatus: 'pending_verification',
+            newStatus: initialStatus,
             timestamp: createdAt,
-            changedBy: 'Video Upload Analysis',
-            note: `Imported uploaded video evidence for ${resolvedType.replace('_', ' ')}.`,
+            changedBy: detection.assignedTo ? `Authority Dispatch (${detection.assignedTo})` : 'AI Analyzer System',
+            note: detection.notes || (detection.department ? `Work order assigned to ${detection.department}.` : 'AI detected anomaly.'),
           }],
         } satisfies Detection;
       });
 
     if (!mapped.length) return;
-    const response = await fetch(apiUrl('/api/detections/import-video'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
-      },
-      body: JSON.stringify({ detections: mapped }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Unable to save analyzed video detections.');
-    const persistedDetections = data.detections as Detection[];
+    let persistedDetections = mapped;
+    try {
+      const response = await fetch(apiUrl('/api/detections/import-video'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
+        body: JSON.stringify({ detections: mapped }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data?.detections) && data.detections.length) {
+          persistedDetections = data.detections as Detection[];
+        }
+      }
+    } catch (e) {
+      console.warn('[AI Analyzer] Syncing to import-video endpoint deferred, persisting locally:', e);
+    }
     appendDetections(persistedDetections);
     setSelectedDetection(persistedDetections[0]);
-    setActiveTab('detections');
+    if (options?.targetTab) {
+      setActiveTab(options.targetTab);
+    }
   };
 
   const submitMobileDetection = async (payload: {
@@ -529,9 +549,10 @@ export default function App() {
           {activeTab === 'real_video' && (
             <RealVideoDetection
               accessToken={sessionToken || ''}
-              onVideoAnalyzed={(videoDetections, videoName) => {
-                handleVideoAnalysisResult(videoDetections, videoName);
+              onVideoAnalyzed={(videoDetections, videoName, options) => {
+                return handleVideoAnalysisResult(videoDetections, videoName, options);
               }}
+              onNavigateTab={setActiveTab}
             />
           )}
 
