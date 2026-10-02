@@ -5,7 +5,6 @@ import path from 'path';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import multer from 'multer';
 import { WebSocketServer } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import { databaseProvider, dbAll, dbGet, dbRun, initializeDatabase, isPostgres } from './src/server/database.ts';
 import { 
   INITIAL_BUSES, 
@@ -1327,6 +1326,7 @@ app.post('/api/simulation/control', async (req, res) => {
 // Vite Middleware Integration
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1349,3 +1349,5 @@ async function startServer() {
 if (!process.env.VERCEL) {
   startServer();
 }
+
+export default app;
