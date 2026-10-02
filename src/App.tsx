@@ -15,6 +15,7 @@ import { PrivacySpecsPage } from './components/privacy/PrivacySpecsPage';
 import { RealVideoDetection } from './components/detections/RealVideoDetection';
 import { DetectionDrawer } from './components/detections/DetectionDrawer';
 import { LoginPage } from './components/auth/LoginPage';
+import { AuthorityManagementPage } from './components/authorities/AuthorityManagementPage';
 import { Detection, Bus, Department, DetectionType } from './types';
 import { DEPARTMENTS } from './data/seedData';
 import { 
@@ -104,6 +105,8 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authorityRequests, setAuthorityRequests] = useState<Array<{ id: number; name: string; email: string; requestedDepartment: Department | null; createdAt: string }>>([]);
+  const [authorityRoster, setAuthorityRoster] = useState<Array<{ id: number; name: string; email: string; role: 'main' | 'department'; department: Department | null; createdAt: string; lastLoginAt?: string }>>([]);
+  const [authorityActivity, setAuthorityActivity] = useState<Array<{ id: number; eventType: string; payload: any; timestamp: string }>>([]);
   const [authorityError, setAuthorityError] = useState('');
   const [authorityNotice, setAuthorityNotice] = useState('');
 
@@ -131,9 +134,11 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     if (user.role === 'main') {
-      void loadAuthorityRequests(sessionToken || '');
-    } else if (!['workflow', 'incidents'].includes(activeTab)) {
-      setActiveTab('workflow');
+      void loadAuthorityData(sessionToken || '');
+    } else {
+      if (!['workflow', 'incidents', 'gis_map', 'real_video', 'overview'].includes(activeTab)) {
+        setActiveTab('workflow');
+      }
     }
   }, [user, sessionToken]);
 
@@ -151,15 +156,20 @@ export default function App() {
     setActiveTab('gis_map');
   };
 
-  const pendingCount = detections.filter(d => d.status === 'pending_verification').length;
-  const criticalCount = detections.filter(d => d.severity === 'critical' && d.status !== 'resolved').length;
+  // Scope detections: authority users only access their department's problems and solve workflows
+  const visibleDetections = user?.role === 'department' && user.department
+    ? detections.filter(d => d.department === user.department)
+    : detections;
+
+  const pendingCount = visibleDetections.filter(d => d.status === 'pending_verification' || (user?.role === 'department' && d.status === 'assigned')).length;
+  const criticalCount = visibleDetections.filter(d => d.severity === 'critical' && d.status !== 'resolved').length;
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const searchResults = normalizedSearch ? [
     ...buses
       .filter(bus => [bus.id, bus.busNumber, bus.routeName, bus.driverName].some(value => value.toLowerCase().includes(normalizedSearch)))
       .slice(0, 5)
       .map(bus => ({ id: bus.id, label: bus.id, detail: `${bus.routeName} · ${bus.driverName}`, kind: 'bus' as const })),
-    ...detections
+    ...visibleDetections
       .filter(detection => [detection.id, detection.locationName, detection.busId, detection.type].some(value => value.toLowerCase().includes(normalizedSearch)))
       .slice(0, 5)
       .map(detection => ({ id: detection.id, label: detection.id, detail: `${detection.type.replace('_', ' ')} · ${detection.locationName}`, kind: 'detection' as const })),
@@ -230,12 +240,14 @@ export default function App() {
     }
   };
 
-  const loadAuthorityRequests = async (token: string) => {
+  const loadAuthorityData = async (token: string) => {
     try {
-      const response = await fetch(apiUrl('/api/admin/authority-requests'), { headers: { Authorization: `Bearer ${token}` } });
-      if (!response.ok) throw new Error('Could not load department access requests.');
+      const response = await fetch(apiUrl('/api/admin/authorities'), { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) throw new Error('Could not load department access requests and authority roster.');
       const data = await response.json();
-      setAuthorityRequests(data.requests);
+      setAuthorityRequests(data.requests || []);
+      setAuthorityRoster(data.roster || []);
+      setAuthorityActivity(data.activity || []);
       setAuthorityError('');
     } catch (error) {
       setAuthorityError(error instanceof Error ? error.message : 'Could not load department access requests.');
@@ -244,21 +256,47 @@ export default function App() {
 
   const approveAuthorityRequest = async (id: number, department: Department) => {
     if (!sessionToken) return;
-    const response = await fetch(apiUrl(`/api/admin/authority-requests/${id}/approve`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
-      body: JSON.stringify({ department }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      setAuthorityError(data.error || 'Could not approve the authority request.');
-      return;
+    try {
+      const response = await fetch(apiUrl(`/api/admin/authority-requests/${id}/approve`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({ department }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setAuthorityError(data.error || 'Could not approve the authority request.');
+        return;
+      }
+      setAuthorityError('');
+      setAuthorityNotice(data.emailSent
+        ? `Access approved for ${department}; an email was sent to the authority.`
+        : `Access approved for ${department}; approval email was not sent. Configure RESEND_API_KEY and AUTH_FROM_EMAIL.`);
+      void loadAuthorityData(sessionToken);
+    } catch (e) {
+      setAuthorityError(e instanceof Error ? e.message : 'Could not approve the authority request.');
     }
-    setAuthorityError('');
-    setAuthorityNotice(data.emailSent
-      ? `Access approved for ${department}; an email was sent to the authority.`
-      : `Access approved for ${department}; approval email was not sent. Configure RESEND_API_KEY and AUTH_FROM_EMAIL.`);
-    setAuthorityRequests((requests) => requests.filter((request) => request.id !== id));
+  };
+
+  const handleForgotPassword = async (email: string) => {
+    const response = await fetch(apiUrl('/api/auth/forgot-password'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim().toLowerCase() }),
+    });
+    const data = await readApiResponse(response);
+    if (!response.ok) throw new Error(data.error || 'Failed to send password reset request.');
+    return data;
+  };
+
+  const handleResetPassword = async (payload: { token: string; email?: string; newPassword: string }) => {
+    const response = await fetch(apiUrl('/api/auth/reset-password'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await readApiResponse(response);
+    if (!response.ok) throw new Error(data.error || 'Failed to reset password.');
+    return data;
   };
 
   const handleLogout = () => {
@@ -410,6 +448,8 @@ export default function App() {
         mode={authMode === 'signup' ? 'signup' : 'login'}
         onModeChange={setAuthMode}
         onSubmit={handleAuthSubmit}
+        onForgotPassword={handleForgotPassword}
+        onResetPassword={handleResetPassword}
         errorMessage={authError}
         isSubmitting={authSubmitting}
       />
@@ -423,7 +463,7 @@ export default function App() {
         simulation={simulation}
         wsConnected={wsConnected}
         notifications={user.role === 'main' ? notifications : notifications.filter((notification) =>
-          detections.some((detection) => detection.id === notification.relatedDetectionId)
+          visibleDetections.some((detection) => detection.id === notification.relatedDetectionId)
         )}
         onPause={pauseSimulation}
         onResume={resumeSimulation}
@@ -440,7 +480,7 @@ export default function App() {
             const bus = buses.find(item => item.id === result.id);
             if (bus) handleOpenMapForBus(bus);
           } else {
-            const detection = detections.find(item => item.id === result.id);
+            const detection = visibleDetections.find(item => item.id === result.id);
             if (detection) setSelectedDetection(detection);
           }
         }}
@@ -458,6 +498,7 @@ export default function App() {
           <Sidebar
             activeTab={activeTab}
             userRole={user.role}
+            userDepartment={user.department}
             onSelectTab={(tab) => {
               setActiveTab(tab);
               window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -489,6 +530,7 @@ export default function App() {
                 <Sidebar
                   activeTab={activeTab}
                   userRole={user.role}
+                  userDepartment={user.department}
                   onSelectTab={(tab) => {
                     setActiveTab(tab);
                     setMobileMenuOpen(false);
@@ -503,38 +545,24 @@ export default function App() {
         )}
         <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pb-16 md:pb-6">
           {activeTab === 'authorities' && user.role === 'main' && (
-            <section className="mx-auto max-w-5xl space-y-5 p-4 md:p-8">
-              <header className="border-b border-slate-200 pb-4">
-                <p className="text-xs font-bold uppercase tracking-widest text-cyan-800">Main branch administration</p>
-                <h1 className="mt-1 text-2xl font-bold text-slate-900">Department access requests</h1>
-                <p className="mt-1 text-sm text-slate-500">Assign each authority to one department before approving dashboard access.</p>
-              </header>
-              {authorityError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{authorityError}</p>}
-              {authorityNotice && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{authorityNotice}</p>}
-              {authorityRequests.length === 0 ? (
-                <p className="py-12 text-center text-sm text-slate-500">No authority requests are waiting for review.</p>
-              ) : authorityRequests.map((request) => (
-                <article key={request.id} className="grid gap-3 border-b border-slate-200 py-4 sm:grid-cols-[1fr_220px_auto] sm:items-center">
-                  <div className="min-w-0">
-                    <h2 className="text-sm font-bold text-slate-900">{request.name}</h2>
-                    <p className="truncate text-xs text-slate-500">{request.email}</p>
-                    <p className="mt-1 text-xs text-slate-600">Requested: {request.requestedDepartment || 'Not specified'}</p>
-                  </div>
-                  <select aria-label={`Assign department to ${request.name}`} defaultValue={request.requestedDepartment || DEPARTMENTS[0]} id={`department-${request.id}`} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800">
-                    {DEPARTMENTS.map((department) => <option key={department} value={department}>{department}</option>)}
-                  </select>
-                  <button onClick={() => {
-                    const select = document.getElementById(`department-${request.id}`) as HTMLSelectElement | null;
-                    if (select) void approveAuthorityRequest(request.id, select.value as Department);
-                  }} className="rounded-lg bg-[#0b4b61] px-4 py-2 text-xs font-bold text-white hover:bg-[#07394a]">Assign and approve</button>
-                </article>
-              ))}
-            </section>
+            <AuthorityManagementPage
+              roster={authorityRoster}
+              requests={authorityRequests}
+              activity={authorityActivity}
+              detections={detections}
+              onApproveRequest={approveAuthorityRequest}
+              onRerouteDetection={(detectionId, department, note) => {
+                assignDepartment(detectionId, department, note);
+              }}
+              onSelectDetection={setSelectedDetection}
+              notice={authorityNotice}
+              error={authorityError}
+            />
           )}
           {activeTab === 'overview' && (
             <OverviewDashboard
               buses={buses}
-              detections={detections}
+              detections={visibleDetections}
               routes={routes}
               onSelectDetection={setSelectedDetection}
               onSelectBus={handleOpenMapForBus}
@@ -560,7 +588,7 @@ export default function App() {
             <div className="h-[calc(100vh-4rem)]">
               <MapView
                 buses={buses}
-                detections={detections}
+                detections={visibleDetections}
                 routes={routes}
                 onSelectDetection={setSelectedDetection}
                 onSelectBus={handleOpenMapForBus}
@@ -595,7 +623,7 @@ export default function App() {
 
               <div className="h-[680px]">
                 <DetectionFeed
-                  detections={detections}
+                  detections={visibleDetections}
                   onSelectDetection={setSelectedDetection}
                   maxItems={50}
                 />
@@ -615,14 +643,14 @@ export default function App() {
           {activeTab === 'ai_monitor' && (
             <AIMonitor
               buses={buses}
-              detections={detections}
+              detections={visibleDetections}
               onTriggerDetection={triggerManualDetection}
             />
           )}
 
           {activeTab === 'workflow' && (
             <WorkflowBoard
-              detections={detections}
+              detections={visibleDetections}
               onSelectDetection={setSelectedDetection}
               onVerify={verifyDetection}
               onAssign={assignDepartment}
@@ -633,7 +661,7 @@ export default function App() {
 
           {activeTab === 'incidents' && (
             <IncidentsPage
-              detections={detections}
+              detections={visibleDetections}
               onSelectDetection={setSelectedDetection}
               onVerify={verifyDetection}
               onResolve={resolveIncident}
@@ -642,7 +670,7 @@ export default function App() {
 
           {activeTab === 'analytics' && (
             <AnalyticsPage
-              detections={detections}
+              detections={visibleDetections}
               buses={buses}
               routes={routes}
             />
@@ -666,45 +694,17 @@ export default function App() {
 
       {/* Mobile Bottom Navigation Bar */}
       <div className="md:hidden fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur-md border-t border-slate-200 py-2 px-3 flex items-center justify-around z-30 shadow-lg">
-        {user.role === 'main' && <button
-          onClick={() => setActiveTab('overview')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'overview' ? 'text-blue-600' : 'text-slate-500'
-          }`}
-        >
-          <LayoutDashboard className="w-4 h-4" />
-          <span>Overview</span>
-        </button>}
-
-        {user.role === 'main' && <button
-          onClick={() => setActiveTab('gis_map')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'gis_map' ? 'text-blue-600' : 'text-slate-500'
-          }`}
-        >
-          <MapPin className="w-4 h-4" />
-          <span>GIS Map</span>
-        </button>}
-
-        {user.role === 'main' && <button
-          onClick={() => setActiveTab('real_video')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'real_video' ? 'text-blue-600' : 'text-slate-500'
-          }`}
-        >
-          <ScanSearch className="w-4 h-4" />
-          <span>AI Vision</span>
-        </button>}
-
-        {user.role === 'main' && <button
-          onClick={() => setActiveTab('detections')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'detections' ? 'text-blue-600' : 'text-slate-500'
-          }`}
-        >
-          <Activity className="w-4 h-4" />
-          <span>Detections</span>
-        </button>}
+        {user.role === 'main' && (
+          <button
+            onClick={() => setActiveTab('overview')}
+            className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
+              activeTab === 'overview' ? 'text-blue-600' : 'text-slate-500'
+            }`}
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            <span>Overview</span>
+          </button>
+        )}
 
         <button
           onClick={() => setActiveTab('workflow')}
@@ -718,6 +718,50 @@ export default function App() {
             <span className="absolute -top-1 -right-1 w-2 h-2 bg-amber-500 rounded-full" />
           )}
         </button>
+
+        {user.role === 'department' && (
+          <button
+            onClick={() => setActiveTab('incidents')}
+            className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
+              activeTab === 'incidents' ? 'text-blue-600' : 'text-slate-500'
+            }`}
+          >
+            <AlertOctagon className="w-4 h-4" />
+            <span>Incidents</span>
+          </button>
+        )}
+
+        <button
+          onClick={() => setActiveTab('gis_map')}
+          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
+            activeTab === 'gis_map' ? 'text-blue-600' : 'text-slate-500'
+          }`}
+        >
+          <MapPin className="w-4 h-4" />
+          <span>GIS Map</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('real_video')}
+          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
+            activeTab === 'real_video' ? 'text-blue-600' : 'text-slate-500'
+          }`}
+        >
+          <ScanSearch className="w-4 h-4" />
+          <span>AI Vision</span>
+        </button>
+
+        {user.role === 'main' && (
+          <button
+            onClick={() => setActiveTab('detections')}
+            className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
+              activeTab === 'detections' ? 'text-blue-600' : 'text-slate-500'
+            }`}
+          >
+            <Activity className="w-4 h-4" />
+            <span>Detections</span>
+          </button>
+        )}
 
         <button
           onClick={() => setMobileMenuOpen(true)}

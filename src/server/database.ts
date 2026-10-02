@@ -150,6 +150,19 @@ class ResilientStore {
         .filter(u => u.role === 'department' && u.department === dept && Boolean(u.approved))
         .map(u => ({ email: u.email }));
     }
+    if (cleanSql.includes("FROM users WHERE approved = TRUE") || cleanSql.includes("FROM users WHERE approved = 1")) {
+      return this.users
+        .filter(u => Boolean(u.approved))
+        .map(u => ({
+          id: u.id,
+          name: u.name,
+          email: u.email,
+          role: u.role,
+          department: u.department,
+          created_at: u.created_at,
+          createdAt: u.created_at,
+        }));
+    }
     if (cleanSql.includes("role = 'department'") && (cleanSql.includes("approved = 0") || cleanSql.includes("approved = FALSE"))) {
       return this.users
         .filter(u => u.role === 'department' && !u.approved)
@@ -186,20 +199,24 @@ class ResilientStore {
     let lastInsertRowid: number | bigint | undefined = undefined;
 
     if (cleanSql.startsWith('INSERT INTO users')) {
-      const isMain = cleanSql.includes("'main'");
       const email = String(params[1] || '').toLowerCase();
       const existingIndex = this.users.findIndex(u => u.email === email);
+      const isMain = cleanSql.includes("'main'") || params[4] === 'main';
+      const role = cleanSql.includes("'main'") ? 'main' : (cleanSql.includes("'department'") ? 'department' : (params[4] || 'department'));
+      const dept = params[5] !== undefined ? params[5] : (params[4] && params[4] !== 'main' && params[4] !== 'department' ? params[4] : null);
+      const reqDept = params[6] !== undefined ? params[6] : (params[4] && params[4] !== 'main' && params[4] !== 'department' ? params[4] : null);
+      const approved = cleanSql.includes('1, ?') || cleanSql.includes('TRUE, ?') || isMain || params[7] === 1 || params[7] === true;
       const newUser = {
         id: existingIndex >= 0 ? this.users[existingIndex].id : this.nextUserId++,
         name: params[0],
         email,
         password_hash: params[2],
         password_salt: params[3],
-        role: isMain ? 'main' : 'department',
-        department: null,
-        requested_department: isMain ? null : (params[4] || null),
-        approved: isMain ? 1 : 0,
-        created_at: isMain ? params[4] : params[5] || new Date().toISOString(),
+        role,
+        department: dept || null,
+        requested_department: reqDept || null,
+        approved: approved ? 1 : 0,
+        created_at: String(params[params.length - 1] || new Date().toISOString()),
       };
       if (existingIndex >= 0) {
         this.users[existingIndex] = newUser;
@@ -209,16 +226,23 @@ class ResilientStore {
       changes = 1;
       lastInsertRowid = newUser.id;
       this.save();
-    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main'")) {
-      const id = params[2];
+    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?")) {
+      const id = params[params.length - 1];
       const user = this.users.find(u => u.id === id);
       if (user) {
         user.password_hash = params[0];
         user.password_salt = params[1];
-        user.role = 'main';
-        user.department = null;
-        user.requested_department = null;
-        user.approved = 1;
+        if (cleanSql.includes("role = 'main'")) {
+          user.role = 'main';
+          user.department = null;
+          user.requested_department = null;
+          user.approved = 1;
+        } else if (cleanSql.includes("role = ?")) {
+          user.role = params[2];
+          user.department = params[3] || null;
+          user.requested_department = params[4] || null;
+          user.approved = 1;
+        }
         changes = 1;
         this.save();
       }

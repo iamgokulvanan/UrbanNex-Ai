@@ -188,6 +188,17 @@ var ResilientStore = class {
       const dept = params[0];
       return this.users.filter((u) => u.role === "department" && u.department === dept && Boolean(u.approved)).map((u) => ({ email: u.email }));
     }
+    if (cleanSql.includes("FROM users WHERE approved = TRUE") || cleanSql.includes("FROM users WHERE approved = 1")) {
+      return this.users.filter((u) => Boolean(u.approved)).map((u) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        department: u.department,
+        created_at: u.created_at,
+        createdAt: u.created_at
+      }));
+    }
     if (cleanSql.includes("role = 'department'") && (cleanSql.includes("approved = 0") || cleanSql.includes("approved = FALSE"))) {
       return this.users.filter((u) => u.role === "department" && !u.approved).map((u) => ({
         id: u.id,
@@ -218,20 +229,24 @@ var ResilientStore = class {
     let changes = 0;
     let lastInsertRowid = void 0;
     if (cleanSql.startsWith("INSERT INTO users")) {
-      const isMain = cleanSql.includes("'main'");
       const email = String(params[1] || "").toLowerCase();
       const existingIndex = this.users.findIndex((u) => u.email === email);
+      const isMain = cleanSql.includes("'main'") || params[4] === "main";
+      const role = cleanSql.includes("'main'") ? "main" : cleanSql.includes("'department'") ? "department" : params[4] || "department";
+      const dept = params[5] !== void 0 ? params[5] : params[4] && params[4] !== "main" && params[4] !== "department" ? params[4] : null;
+      const reqDept = params[6] !== void 0 ? params[6] : params[4] && params[4] !== "main" && params[4] !== "department" ? params[4] : null;
+      const approved = cleanSql.includes("1, ?") || cleanSql.includes("TRUE, ?") || isMain || params[7] === 1 || params[7] === true;
       const newUser = {
         id: existingIndex >= 0 ? this.users[existingIndex].id : this.nextUserId++,
         name: params[0],
         email,
         password_hash: params[2],
         password_salt: params[3],
-        role: isMain ? "main" : "department",
-        department: null,
-        requested_department: isMain ? null : params[4] || null,
-        approved: isMain ? 1 : 0,
-        created_at: isMain ? params[4] : params[5] || (/* @__PURE__ */ new Date()).toISOString()
+        role,
+        department: dept || null,
+        requested_department: reqDept || null,
+        approved: approved ? 1 : 0,
+        created_at: String(params[params.length - 1] || (/* @__PURE__ */ new Date()).toISOString())
       };
       if (existingIndex >= 0) {
         this.users[existingIndex] = newUser;
@@ -241,16 +256,23 @@ var ResilientStore = class {
       changes = 1;
       lastInsertRowid = newUser.id;
       this.save();
-    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main'")) {
-      const id = params[2];
+    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?")) {
+      const id = params[params.length - 1];
       const user = this.users.find((u) => u.id === id);
       if (user) {
         user.password_hash = params[0];
         user.password_salt = params[1];
-        user.role = "main";
-        user.department = null;
-        user.requested_department = null;
-        user.approved = 1;
+        if (cleanSql.includes("role = 'main'")) {
+          user.role = "main";
+          user.department = null;
+          user.requested_department = null;
+          user.approved = 1;
+        } else if (cleanSql.includes("role = ?")) {
+          user.role = params[2];
+          user.department = params[3] || null;
+          user.requested_department = params[4] || null;
+          user.approved = 1;
+        }
         changes = 1;
         this.save();
       }
@@ -1331,26 +1353,83 @@ function publicUser(user) {
 }
 async function bootstrapMainBranch() {
   const accountsToEnsure = [
-    { email: "admin@urbannex.ai", password: "admin123" }
+    {
+      email: "iamgokulvanan@gmail.com",
+      password: "gokul123@",
+      role: "main",
+      department: null,
+      name: "Main Branch Director (Gokulvanan)"
+    },
+    {
+      email: "admin@urbannex.ai",
+      password: "admin123",
+      role: "main",
+      department: null,
+      name: "Main Branch Authority"
+    },
+    {
+      email: "roads@urbannex.ai",
+      password: "roads123@",
+      role: "department",
+      department: "Roads & Infrastructure",
+      name: "Eng. K. Rajesh (Roads & Infrastructure)"
+    },
+    {
+      email: "water@urbannex.ai",
+      password: "water123@",
+      role: "department",
+      department: "Water & Drainage",
+      name: "Officer M. Senthil (Water & Drainage)"
+    },
+    {
+      email: "traffic@urbannex.ai",
+      password: "traffic123@",
+      role: "department",
+      department: "Traffic Management",
+      name: "Inspector P. Kumar (Traffic Management)"
+    },
+    {
+      email: "safety@urbannex.ai",
+      password: "safety123@",
+      role: "department",
+      department: "Public Safety",
+      name: "Officer R. Anand (Public Safety)"
+    },
+    {
+      email: "emergency@urbannex.ai",
+      password: "emergency123@",
+      role: "department",
+      department: "Emergency Response",
+      name: "Captain S. Vijay (Emergency Response)"
+    }
   ];
   const envEmail = process.env.URBANNEX_ADMIN_EMAIL?.trim().toLowerCase();
   const envPassword = process.env.URBANNEX_ADMIN_PASSWORD;
-  if (envEmail && envPassword && envEmail !== "admin@urbannex.ai") {
-    accountsToEnsure.push({ email: envEmail, password: envPassword });
+  if (envEmail && envPassword && !accountsToEnsure.some((a) => a.email === envEmail)) {
+    accountsToEnsure.push({
+      email: envEmail,
+      password: envPassword,
+      role: "main",
+      department: null,
+      name: "Main Branch Authority"
+    });
   }
-  for (const { email, password } of accountsToEnsure) {
-    if (password.length < 4) continue;
-    const existing = await dbGet("SELECT id FROM users WHERE email = ?", [email]);
-    const credentials = hashPassword(password);
+  for (const account of accountsToEnsure) {
+    if (account.password.length < 4) continue;
+    const existing = await dbGet("SELECT id FROM users WHERE email = ?", [account.email]);
+    const credentials = hashPassword(account.password);
     if (existing) {
-      await dbRun("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main', department = NULL, requested_department = NULL, approved = 1 WHERE id = ?", [credentials.hash, credentials.salt, existing.id]);
-      console.log(`[Auth] Main Branch Authority updated (${email}).`);
+      await dbRun(
+        "UPDATE users SET password_hash = ?, password_salt = ?, role = ?, department = ?, requested_department = ?, approved = 1 WHERE id = ?",
+        [credentials.hash, credentials.salt, account.role, account.department, account.department, existing.id]
+      );
+      console.log(`[Auth] Account updated (${account.email} \xB7 ${account.role}).`);
     } else {
       await dbRun(`
-        INSERT INTO users (name, email, password_hash, password_salt, role, approved, created_at)
-        VALUES (?, ?, ?, ?, 'main', 1, ?)
-      `, ["Main Branch Authority", email, credentials.hash, credentials.salt, (/* @__PURE__ */ new Date()).toISOString()]);
-      console.log(`[Auth] Main Branch Authority bootstrapped (${email}).`);
+        INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+      `, [account.name, account.email, credentials.hash, credentials.salt, account.role, account.department, account.department, (/* @__PURE__ */ new Date()).toISOString()]);
+      console.log(`[Auth] Account bootstrapped (${account.email} \xB7 ${account.role}).`);
     }
   }
 }
@@ -2001,8 +2080,12 @@ app.post("/api/auth/forgot-password", async (req, res) => {
       return res.status(503).json({ error: "Password reset email could not be sent. Please contact your administrator." });
     }
   }
-  if (process.env.NODE_ENV !== "production") {
-    return res.json({ message: genericMessage, developmentToken: resetToken });
+  if (process.env.NODE_ENV !== "production" || !resendKey) {
+    return res.json({
+      message: "Reset verification token generated successfully.",
+      resetToken,
+      developmentToken: resetToken
+    });
   }
   await dbRun("DELETE FROM password_resets WHERE token_hash = ?", [tokenHash]);
   return res.status(503).json({ error: "Password reset delivery is not configured. Please contact your administrator." });
@@ -2049,6 +2132,27 @@ app.post("/api/auth/login", async (req, res) => {
     if (!record.approved) {
       return res.status(403).json({ code: "DEPARTMENT_PENDING", error: "Your department access is awaiting main-branch approval." });
     }
+    const loginTimestamp = (/* @__PURE__ */ new Date()).toISOString();
+    const loginNoticeSubject = `[UrbanNex Security] Authority Desk Login: ${record.name} (${record.department || "Main Branch"})`;
+    const loginNoticeText = [
+      `UrbanNex City Command - Authority Login Alert`,
+      `User: ${record.name}`,
+      `Email: ${record.email}`,
+      `Role: ${record.role === "main" ? "Main Branch Commander" : "Department Authority"}`,
+      `Department: ${record.department || "Main Branch Command Center"}`,
+      `Timestamp: ${loginTimestamp}`,
+      `Portal: ${getApplicationUrl()}`
+    ].join("\n");
+    void sendAuthorityEmail(record.email, loginNoticeSubject, loginNoticeText).catch(() => {
+    });
+    if (record.email !== "iamgokulvanan@gmail.com") {
+      void sendAuthorityEmail("iamgokulvanan@gmail.com", loginNoticeSubject, loginNoticeText).catch(() => {
+      });
+    }
+    await dbRun(
+      "INSERT INTO realtime_events (event_type, payload, target_department, created_at) VALUES (?, ?, ?, ?)",
+      ["auth:login", JSON.stringify({ userId: record.id, name: record.name, email: record.email, role: record.role, department: record.department, timestamp: loginTimestamp }), record.department || null, loginTimestamp]
+    );
     return res.json(await createSession({
       id: Number(record.id),
       name: record.name,
@@ -2072,6 +2176,22 @@ app.get("/api/auth/me", async (req, res) => {
     console.error("[Auth] Session lookup failed:", error);
     return res.status(500).json({ code: "DATABASE_UNAVAILABLE", error: "Authentication database is unavailable." });
   }
+});
+app.get("/api/admin/authorities", async (req, res) => {
+  if (!await requireMainBranch(req, res)) return;
+  const requests = await dbAll(`
+    SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
+    FROM users WHERE role = 'department' AND approved = FALSE ORDER BY created_at ASC
+  `);
+  const roster = await dbAll(`
+    SELECT id, name, email, role, department, created_at AS createdAt
+    FROM users WHERE approved = TRUE ORDER BY role DESC, department ASC, name ASC
+  `);
+  const activity = await dbAll(`
+    SELECT id, payload, created_at AS createdAt
+    FROM realtime_events WHERE event_type = 'auth:login' ORDER BY id DESC LIMIT 20
+  `);
+  res.json({ requests, roster, activity });
 });
 app.get("/api/admin/authority-requests", async (req, res) => {
   if (!await requireMainBranch(req, res)) return;
@@ -2253,7 +2373,7 @@ app.get("/api/detections/:id", async (req, res) => {
   res.json(detection);
 });
 app.post("/api/detections/import-video", async (req, res) => {
-  const user = await requireMainBranch(req, res);
+  const user = await requireUser(req, res);
   if (!user) return;
   const incoming = req.body.detections;
   if (!Array.isArray(incoming) || incoming.length < 1 || incoming.length > 50) {
@@ -2271,7 +2391,8 @@ app.post("/api/detections/import-video", async (req, res) => {
     }
     const detectionId = `VID-${(/* @__PURE__ */ new Date()).getUTCFullYear()}-${(0, import_node_crypto.randomBytes)(6).toString("hex").toUpperCase()}`;
     const incomingStatus = ["pending_verification", "verified", "assigned", "in_progress", "resolved"].includes(item.status) ? item.status : "pending_verification";
-    const incomingDept = item.department && DEPARTMENTS.includes(item.department) ? item.department : void 0;
+    const resolvedDept = item.department && DEPARTMENTS.includes(item.department) ? item.department : user.role === "department" ? user.department : void 0;
+    const incomingDept = resolvedDept && DEPARTMENTS.includes(resolvedDept) ? resolvedDept : void 0;
     const finalStatus = incomingDept ? incomingStatus === "pending_verification" ? "assigned" : incomingStatus : incomingStatus;
     const assignedTo = typeof item.assignedTo === "string" ? item.assignedTo.slice(0, 120) : void 0;
     const detection = {

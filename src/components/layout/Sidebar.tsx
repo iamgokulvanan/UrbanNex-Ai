@@ -14,8 +14,10 @@ import {
   Info,
   Camera,
   ScanSearch,
-  UserRoundCog
+  UserRoundCog,
+  Building2
 } from 'lucide-react';
+import { Department } from '../../types';
 
 export type NavTab = 
   | 'overview'
@@ -39,6 +41,7 @@ interface SidebarProps {
   pendingCount: number;
   criticalCount: number;
   userRole: 'main' | 'department';
+  userDepartment?: Department | null;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -48,20 +51,59 @@ export const Sidebar: React.FC<SidebarProps> = ({
   pendingCount,
   criticalCount,
   userRole,
+  userDepartment,
 }) => {
-  const navItems = [
+  const isDept = userRole === 'department';
+
+  const navItems = isDept ? [
+    {
+      id: 'workflow' as NavTab,
+      label: 'Authority Solve Desk',
+      icon: Kanban,
+      badge: pendingCount > 0 ? `${pendingCount} Open` : null,
+      badgeColor: 'bg-purple-100 text-purple-800',
+    },
+    {
+      id: 'incidents' as NavTab,
+      label: 'Department Incidents',
+      icon: AlertOctagon,
+      badge: criticalCount > 0 ? `${criticalCount} Crit` : null,
+      badgeColor: 'bg-red-100 text-red-700',
+    },
+    {
+      id: 'gis_map' as NavTab,
+      label: 'Live GIS Map',
+      icon: MapPin,
+      badge: 'Assigned Pins',
+      badgeColor: 'bg-blue-100 text-blue-700',
+    },
+    {
+      id: 'real_video' as NavTab,
+      label: 'AI Analyzer',
+      icon: ScanSearch,
+      badge: 'Field Scan',
+      badgeColor: 'bg-emerald-100 text-emerald-700',
+    },
+    {
+      id: 'overview' as NavTab,
+      label: 'Desk Overview',
+      icon: LayoutDashboard,
+      badge: null,
+    },
+  ] : [
     {
       id: 'overview' as NavTab,
       label: 'Overview',
       icon: LayoutDashboard,
       badge: null,
     },
-    ...(userRole === 'main' ? [{
+    {
       id: 'authorities' as NavTab,
       label: 'Authority Access',
       icon: UserRoundCog,
-      badge: null,
-    }] : []),
+      badge: 'Admin',
+      badgeColor: 'bg-indigo-100 text-indigo-700',
+    },
     {
       id: 'real_video' as NavTab,
       label: 'AI Analyzer',
@@ -132,36 +174,41 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-slate-100 text-slate-600',
     },
   ];
-  const visibleNavItems = userRole === 'main'
-    ? navItems
-    : navItems.filter((item) => ['workflow', 'incidents'].includes(item.id));
 
   return (
     <aside className="w-64 bg-white border-r border-slate-200 flex flex-col justify-between shrink-0 h-screen sticky top-0 shadow-xs z-20">
       {/* Top Header info */}
       <div className="p-4">
-        <div className="flex items-center gap-2.5 px-2 py-1.5 mb-4 bg-slate-50 border border-slate-200 rounded-xl">
-          <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white shrink-0">
-            <Zap className="w-4 h-4 text-yellow-300 fill-yellow-300" />
+        <div className={`flex items-center gap-2.5 px-3 py-2 mb-4 rounded-xl border ${
+          isDept ? 'bg-indigo-50/80 border-indigo-200' : 'bg-slate-50 border-slate-200'
+        }`}>
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0 ${
+            isDept ? 'bg-indigo-600 shadow-xs' : 'bg-blue-600 shadow-xs'
+          }`}>
+            {isDept ? <Building2 className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4 text-white" />}
           </div>
           <div className="min-w-0">
-            <p className="text-xs font-bold text-slate-900 leading-tight">Command Center</p>
-            <p className="text-[10px] text-slate-500 truncate">Smart Automation #26124</p>
+            <p className="text-xs font-black text-slate-900 leading-tight truncate">
+              {isDept ? (userDepartment || 'Authority Desk') : 'Main Command'}
+            </p>
+            <p className="text-[10px] text-slate-500 truncate font-semibold">
+              {isDept ? 'Municipal Division' : 'Executive Headquarters'}
+            </p>
           </div>
         </div>
 
         {/* Nav list */}
         <nav className="space-y-1">
-          {visibleNavItems.map((item) => {
+          {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
             return (
               <button
                 key={item.id}
                 onClick={() => onSelectTab(item.id)}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
                   isActive
-                    ? 'bg-blue-600 text-white shadow-xs'
+                    ? (isDept ? 'bg-indigo-600 text-white shadow-xs font-bold' : 'bg-blue-600 text-white shadow-xs font-bold')
                     : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80'
                 }`}
               >
@@ -188,12 +235,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="p-4 border-t border-slate-100 bg-slate-50/70">
         <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-1.5 shadow-2xs">
           <div className="flex items-center justify-between text-[11px]">
-            <span className="text-slate-500 font-medium">Edge Sensor Fleet:</span>
-            <span className="font-bold text-emerald-600">12 Active</span>
+            <span className="text-slate-500 font-medium">{isDept ? 'Active Problems:' : 'Edge Sensor Fleet:'}</span>
+            <span className="font-bold text-emerald-600">{isDept ? `${pendingCount} Assigned` : `${activeBusCount} Active`}</span>
           </div>
           <div className="flex items-center justify-between text-[11px]">
-            <span className="text-slate-500 font-medium">Inference FPS:</span>
-            <span className="font-bold text-blue-600">28.6 FPS</span>
+            <span className="text-slate-500 font-medium">{isDept ? 'Resolution SLA:' : 'Inference FPS:'}</span>
+            <span className="font-bold text-blue-600">{isDept ? 'Active Tracking' : '28.6 FPS'}</span>
           </div>
           <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden mt-1">
             <div className="bg-emerald-500 h-full rounded-full w-[98.7%]" />
@@ -202,7 +249,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         <div className="mt-3 text-[10px] text-slate-400 text-center leading-tight">
           UrbanNex AI · SIH 2026<br />
-          <span className="text-slate-500 font-medium">Coimbatore Transit Pilot</span>
+          <span className="text-slate-500 font-medium">
+            {isDept ? `${userDepartment || 'Authority Desk'} Access` : 'Coimbatore City Command'}
+          </span>
         </div>
       </div>
     </aside>

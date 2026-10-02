@@ -127,28 +127,92 @@ function publicUser(user: AuthUser) {
 }
 
 async function bootstrapMainBranch() {
-  const accountsToEnsure = [
-    { email: 'admin@urbannex.ai', password: 'admin123' },
+  const accountsToEnsure: Array<{
+    email: string;
+    password: string;
+    role: 'main' | 'department';
+    department: Department | null;
+    name: string;
+  }> = [
+    {
+      email: 'iamgokulvanan@gmail.com',
+      password: 'gokul123@',
+      role: 'main',
+      department: null,
+      name: 'Main Branch Director (Gokulvanan)',
+    },
+    {
+      email: 'admin@urbannex.ai',
+      password: 'admin123',
+      role: 'main',
+      department: null,
+      name: 'Main Branch Authority',
+    },
+    {
+      email: 'roads@urbannex.ai',
+      password: 'roads123@',
+      role: 'department',
+      department: 'Roads & Infrastructure',
+      name: 'Eng. K. Rajesh (Roads & Infrastructure)',
+    },
+    {
+      email: 'water@urbannex.ai',
+      password: 'water123@',
+      role: 'department',
+      department: 'Water & Drainage',
+      name: 'Officer M. Senthil (Water & Drainage)',
+    },
+    {
+      email: 'traffic@urbannex.ai',
+      password: 'traffic123@',
+      role: 'department',
+      department: 'Traffic Management',
+      name: 'Inspector P. Kumar (Traffic Management)',
+    },
+    {
+      email: 'safety@urbannex.ai',
+      password: 'safety123@',
+      role: 'department',
+      department: 'Public Safety',
+      name: 'Officer R. Anand (Public Safety)',
+    },
+    {
+      email: 'emergency@urbannex.ai',
+      password: 'emergency123@',
+      role: 'department',
+      department: 'Emergency Response',
+      name: 'Captain S. Vijay (Emergency Response)',
+    },
   ];
+
   const envEmail = process.env.URBANNEX_ADMIN_EMAIL?.trim().toLowerCase();
   const envPassword = process.env.URBANNEX_ADMIN_PASSWORD;
-  if (envEmail && envPassword && envEmail !== 'admin@urbannex.ai') {
-    accountsToEnsure.push({ email: envEmail, password: envPassword });
+  if (envEmail && envPassword && !accountsToEnsure.some(a => a.email === envEmail)) {
+    accountsToEnsure.push({
+      email: envEmail,
+      password: envPassword,
+      role: 'main',
+      department: null,
+      name: 'Main Branch Authority',
+    });
   }
 
-  for (const { email, password } of accountsToEnsure) {
-    if (password.length < 4) continue;
-    const existing = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
-    const credentials = hashPassword(password);
+  for (const account of accountsToEnsure) {
+    if (account.password.length < 4) continue;
+    const existing = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [account.email]);
+    const credentials = hashPassword(account.password);
     if (existing) {
-      await dbRun("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main', department = NULL, requested_department = NULL, approved = 1 WHERE id = ?", [credentials.hash, credentials.salt, existing.id]);
-      console.log(`[Auth] Main Branch Authority updated (${email}).`);
+      await dbRun(
+        "UPDATE users SET password_hash = ?, password_salt = ?, role = ?, department = ?, requested_department = ?, approved = 1 WHERE id = ?",
+        [credentials.hash, credentials.salt, account.role, account.department, account.department, existing.id]
+      );
+      console.log(`[Auth] Account updated (${account.email} · ${account.role}).`);
     } else {
       await dbRun(`
-        INSERT INTO users (name, email, password_hash, password_salt, role, approved, created_at)
-        VALUES (?, ?, ?, ?, 'main', 1, ?)
-      `, ['Main Branch Authority', email, credentials.hash, credentials.salt, new Date().toISOString()]);
-      console.log(`[Auth] Main Branch Authority bootstrapped (${email}).`);
+        INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+      `, [account.name, account.email, credentials.hash, credentials.salt, account.role, account.department, account.department, new Date().toISOString()]);
+      console.log(`[Auth] Account bootstrapped (${account.email} · ${account.role}).`);
     }
   }
 }
@@ -901,8 +965,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     }
   }
 
-  if (process.env.NODE_ENV !== 'production') {
-    return res.json({ message: genericMessage, developmentToken: resetToken });
+  if (process.env.NODE_ENV !== 'production' || !resendKey) {
+    return res.json({ 
+      message: 'Reset verification token generated successfully.', 
+      resetToken, 
+      developmentToken: resetToken 
+    });
   }
   await dbRun('DELETE FROM password_resets WHERE token_hash = ?', [tokenHash]);
   return res.status(503).json({ error: 'Password reset delivery is not configured. Please contact your administrator.' });
@@ -954,6 +1022,31 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(403).json({ code: 'DEPARTMENT_PENDING', error: 'Your department access is awaiting main-branch approval.' });
     }
 
+    // Security & Audit Log for authority login
+    const loginTimestamp = new Date().toISOString();
+    const loginNoticeSubject = `[UrbanNex Security] Authority Desk Login: ${record.name} (${record.department || 'Main Branch'})`;
+    const loginNoticeText = [
+      `UrbanNex City Command - Authority Login Alert`,
+      `User: ${record.name}`,
+      `Email: ${record.email}`,
+      `Role: ${record.role === 'main' ? 'Main Branch Commander' : 'Department Authority'}`,
+      `Department: ${record.department || 'Main Branch Command Center'}`,
+      `Timestamp: ${loginTimestamp}`,
+      `Portal: ${getApplicationUrl()}`,
+    ].join('\n');
+
+    // Notify user email and notify main branch administrator (iamgokulvanan@gmail.com)
+    void sendAuthorityEmail(record.email, loginNoticeSubject, loginNoticeText).catch(() => {});
+    if (record.email !== 'iamgokulvanan@gmail.com') {
+      void sendAuthorityEmail('iamgokulvanan@gmail.com', loginNoticeSubject, loginNoticeText).catch(() => {});
+    }
+
+    // Persist login event to audit log in database
+    await dbRun(
+      'INSERT INTO realtime_events (event_type, payload, target_department, created_at) VALUES (?, ?, ?, ?)',
+      ['auth:login', JSON.stringify({ userId: record.id, name: record.name, email: record.email, role: record.role, department: record.department, timestamp: loginTimestamp }), record.department || null, loginTimestamp]
+    );
+
     return res.json(await createSession({
       id: Number(record.id),
       name: record.name,
@@ -978,6 +1071,23 @@ app.get('/api/auth/me', async (req, res) => {
     console.error('[Auth] Session lookup failed:', error);
     return res.status(500).json({ code: 'DATABASE_UNAVAILABLE', error: 'Authentication database is unavailable.' });
   }
+});
+
+app.get('/api/admin/authorities', async (req, res) => {
+  if (!await requireMainBranch(req, res)) return;
+  const requests = await dbAll(`
+    SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
+    FROM users WHERE role = 'department' AND approved = FALSE ORDER BY created_at ASC
+  `);
+  const roster = await dbAll(`
+    SELECT id, name, email, role, department, created_at AS createdAt
+    FROM users WHERE approved = TRUE ORDER BY role DESC, department ASC, name ASC
+  `);
+  const activity = await dbAll(`
+    SELECT id, payload, created_at AS createdAt
+    FROM realtime_events WHERE event_type = 'auth:login' ORDER BY id DESC LIMIT 20
+  `);
+  res.json({ requests, roster, activity });
 });
 
 app.get('/api/admin/authority-requests', async (req, res) => {
@@ -1173,7 +1283,7 @@ app.get('/api/detections/:id', async (req, res) => {
 });
 
 app.post('/api/detections/import-video', async (req, res) => {
-  const user = await requireMainBranch(req, res);
+  const user = await requireUser(req, res);
   if (!user) return;
   const incoming = req.body.detections;
   if (!Array.isArray(incoming) || incoming.length < 1 || incoming.length > 50) {
@@ -1194,7 +1304,8 @@ app.post('/api/detections/import-video', async (req, res) => {
     }
     const detectionId = `VID-${new Date().getUTCFullYear()}-${randomBytes(6).toString('hex').toUpperCase()}`;
     const incomingStatus = ['pending_verification', 'verified', 'assigned', 'in_progress', 'resolved'].includes(item.status) ? item.status : 'pending_verification';
-    const incomingDept = item.department && DEPARTMENTS.includes(item.department) ? item.department : undefined;
+    const resolvedDept = (item.department && DEPARTMENTS.includes(item.department)) ? item.department : (user.role === 'department' ? user.department : undefined);
+    const incomingDept = resolvedDept && DEPARTMENTS.includes(resolvedDept) ? resolvedDept : undefined;
     const finalStatus = incomingDept ? (incomingStatus === 'pending_verification' ? 'assigned' : incomingStatus) : incomingStatus;
     const assignedTo = typeof item.assignedTo === 'string' ? item.assignedTo.slice(0, 120) : undefined;
 
