@@ -33,8 +33,8 @@ The `.github/workflows/deploy-vercel.yml` workflow validates pushes and pull req
 - `VERCEL_ORG_ID`
 - `VERCEL_PROJECT_ID`
 
-Configure application variables in Vercel Project Settings, not in GitHub source: `URBANNEX_ADMIN_EMAIL`, `URBANNEX_ADMIN_PASSWORD`, `RESEND_API_KEY`, `AUTH_FROM_EMAIL`, and `APP_URL`. Never commit passwords, API keys, or Vercel tokens. The local `.env` is ignored by Git and is not transferred by the deployment workflow.
+Configure `BACKEND_URL` in Vercel to proxy HTTP API requests to the persistent Node backend. Configure `VITE_API_BASE_URL` and `VITE_WS_URL` for the frontend, plus `DATABASE_URL`, `URBANNEX_ADMIN_EMAIL`, `URBANNEX_ADMIN_PASSWORD`, `SESSION_SECRET`, `JWT_SECRET`, `RESEND_API_KEY`, `AUTH_FROM_EMAIL`, and `APP_URL` on the backend host. Never commit passwords, API keys, or Vercel tokens. The local `.env` is ignored by Git and is not transferred by the deployment workflow.
 
 ## Deployment note
 
-The current application uses a local SQLite database at `urbannex.db`. That is suitable for a single persistent server instance. Serverless deployments with ephemeral filesystems need a persistent/shared database before using this flow across restarts or multiple instances; configure storage accordingly before production use.
+SQLite at `urbannex.db` is for local development. Production should use PostgreSQL via `DATABASE_URL`; migrations live in `migrations/`. Vercel hosts the frontend and HTTP proxy; the Node API and WebSocket server must run on a persistent backend host.

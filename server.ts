@@ -3,10 +3,10 @@ import 'dotenv/config';
 import http from 'http';
 import path from 'path';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import Database from 'better-sqlite3';
 import multer from 'multer';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer } from 'ws';
 import { createServer as createViteServer } from 'vite';
+import { databaseProvider, dbAll, dbGet, dbRun, initializeDatabase, isPostgres } from './src/server/database.ts';
 import { 
   INITIAL_BUSES, 
   INITIAL_DETECTIONS, 
@@ -25,10 +25,72 @@ import {
 import { DemoInferenceService } from './src/services/aiInference.ts';
 
 export const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 const server = http.createServer(app);
 
+const allowedOrigins = new Set(
+  [
+    process.env.CORS_ORIGIN,
+    process.env.FRONTEND_URL,
+    process.env.APP_URL,
+    process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '',
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+  ]
+    .filter(Boolean)
+    .flatMap((value) => value.split(',').map((entry) => entry.trim()).filter(Boolean))
+);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const isAllowedOrigin = !origin || allowedOrigins.has(origin) || (!origin && req.method === 'OPTIONS');
+  if (isAllowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  }
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: '5mb' }));
+
+let databaseInitializationError: unknown;
+const databaseReady = initializeDatabase()
+  .then(async () => {
+    await bootstrapMainBranch();
+    detections = await loadPersistedDetections();
+    await loadSimulationState();
+  })
+  .catch((error) => {
+    databaseInitializationError = error;
+    console.error('[Database] Initialization failed:', error);
+  });
+
+app.use(async (_req, res, next) => {
+  await databaseReady;
+  if (databaseInitializationError) {
+    return res.status(503).json({
+      code: 'DATABASE_UNAVAILABLE',
+      error: 'Persistent database is unavailable. Configure DATABASE_URL for production.',
+    });
+  }
+  if (process.env.VERCEL) {
+    try {
+      detections = await loadPersistedDetections();
+    } catch (error) {
+      console.error('[Database] Failed to refresh persisted incidents:', error);
+      return res.status(503).json({ code: 'DATABASE_UNAVAILABLE', error: 'Persistent database is unavailable.' });
+    }
+  }
+  next();
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -37,59 +99,8 @@ const upload = multer({
   },
 });
 
-const database = new Database(path.join(process.cwd(), 'urbannex.db'));
-database.pragma('journal_mode = WAL');
-database.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    password_salt TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'department',
-    department TEXT,
-    requested_department TEXT,
-    approved INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS mobile_detections (
-    id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    payload TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS detection_state (
-    id TEXT PRIMARY KEY,
-    payload TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS password_resets (
-    token_hash TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-`);
-
-const userColumns = database.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
-for (const [column, definition] of [
-  ['role', "TEXT NOT NULL DEFAULT 'department'"],
-  ['department', 'TEXT'],
-  ['requested_department', 'TEXT'],
-  ['approved', 'INTEGER NOT NULL DEFAULT 0'],
-] as const) {
-  if (!userColumns.some((item) => item.name === column)) {
-    database.exec(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
-  }
-}
-
 type AuthUser = {
-  id: number;
+  id: number | string;
   name: string;
   email: string;
   role: 'main' | 'department';
@@ -97,13 +108,13 @@ type AuthUser = {
   approved: boolean;
 };
 
-type UserRecord = Omit<AuthUser, 'approved'> & { approved: number };
+type UserRecord = Omit<AuthUser, 'approved'> & { approved: number | boolean; password_hash?: string; password_salt?: string };
 
 function publicUser(user: AuthUser) {
   return { ...user };
 }
 
-function bootstrapMainBranch() {
+async function bootstrapMainBranch() {
   const email = process.env.URBANNEX_ADMIN_EMAIL?.trim().toLowerCase();
   const password = process.env.URBANNEX_ADMIN_PASSWORD;
   if (!email || !password) {
@@ -112,22 +123,19 @@ function bootstrapMainBranch() {
   }
   if (password.length < 4) throw new Error('URBANNEX_ADMIN_PASSWORD must be at least 4 characters.');
 
-  const existing = database.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number } | undefined;
+  const existing = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
   if (existing) {
     const credentials = hashPassword(password);
-    database.prepare("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main', department = NULL, requested_department = NULL, approved = 1 WHERE id = ?")
-      .run(credentials.hash, credentials.salt, existing.id);
+    await dbRun("UPDATE users SET password_hash = ?, password_salt = ?, role = 'main', department = NULL, requested_department = NULL, approved = 1 WHERE id = ?", [credentials.hash, credentials.salt, existing.id]);
     return;
   }
 
   const credentials = hashPassword(password);
-  database.prepare(`
+  await dbRun(`
     INSERT INTO users (name, email, password_hash, password_salt, role, approved, created_at)
     VALUES (?, ?, ?, ?, 'main', 1, ?)
-  `).run('Main Branch Authority', email, credentials.hash, credentials.salt, new Date().toISOString());
+  `, ['Main Branch Authority', email, credentials.hash, credentials.salt, new Date().toISOString()]);
 }
-
-bootstrapMainBranch();
 
 function hashPassword(password: string, salt = randomBytes(16).toString('hex')) {
   return {
@@ -158,11 +166,11 @@ function getApplicationUrl() {
   return 'http://localhost:3000';
 }
 
-function notifyDepartmentOfIncident(detection: Detection, changedBy: string) {
+async function notifyDepartmentOfIncident(detection: Detection, changedBy: string) {
   if (!detection.department) return;
-  const recipients = database.prepare(`
+  const recipients = await dbAll<{ email: string }>(`
     SELECT email FROM users WHERE role = 'department' AND department = ? AND approved = 1
-  `).all(detection.department) as Array<{ email: string }>;
+  `, [detection.department]);
   const subject = `UrbanNex incident ${detection.id}: ${detection.status.replace('_', ' ')}`;
   const text = [
     `Incident ${detection.id} has been updated.`,
@@ -184,13 +192,24 @@ function notifyDepartmentOfIncident(detection: Detection, changedBy: string) {
   }
 }
 
-function getUserByToken(token: string | undefined): AuthUser | null {
+function getSessionSecret(): string | undefined {
+  return process.env.SESSION_SECRET || process.env.JWT_SECRET || undefined;
+}
+
+function hashSessionToken(token: string) {
+  const secret = getSessionSecret();
+  if (!secret) return token;
+  return createHash('sha256').update(`${secret}:${token}`).digest('hex');
+}
+
+async function getUserByToken(token: string | undefined): Promise<AuthUser | null> {
   if (!token) return null;
-  const user = database.prepare(`
+  const lookupToken = hashSessionToken(token);
+  const user = await dbGet<UserRecord>(`
     SELECT users.id, users.name, users.email, users.role, users.department, users.approved
     FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token = ?
-  `).get(token) as UserRecord | undefined;
+  `, [lookupToken]);
   return user ? { ...user, approved: Boolean(user.approved) } : null;
 }
 
@@ -199,15 +218,15 @@ function getBearerToken(req: express.Request) {
   return header?.startsWith('Bearer ') ? header.slice(7) : undefined;
 }
 
-function createSession(user: AuthUser) {
+async function createSession(user: AuthUser) {
   const token = randomBytes(32).toString('hex');
-  database.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)')
-    .run(token, user.id, new Date().toISOString());
+  const storedToken = hashSessionToken(token);
+  await dbRun('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)', [storedToken, user.id, new Date().toISOString()]);
   return { token, user: publicUser(user) };
 }
 
-function requireUser(req: express.Request, res: express.Response): AuthUser | null {
-  const user = getUserByToken(getBearerToken(req));
+async function requireUser(req: express.Request, res: express.Response): Promise<AuthUser | null> {
+  const user = await getUserByToken(getBearerToken(req));
   if (!user || !user.approved) {
     res.status(401).json({ error: 'Please sign in with an approved authority account.' });
     return null;
@@ -215,8 +234,8 @@ function requireUser(req: express.Request, res: express.Response): AuthUser | nu
   return user;
 }
 
-function requireMainBranch(req: express.Request, res: express.Response): AuthUser | null {
-  const user = requireUser(req, res);
+async function requireMainBranch(req: express.Request, res: express.Response): Promise<AuthUser | null> {
+  const user = await requireUser(req, res);
   if (!user) return null;
   if (user.role !== 'main') {
     res.status(403).json({ error: 'Main-branch authority is required for this action.' });
@@ -231,15 +250,15 @@ function canAccessDetection(user: AuthUser, detection: Detection) {
 
 // In-memory persistent state for prototype demonstration
 let buses: Bus[] = JSON.parse(JSON.stringify(INITIAL_BUSES));
-function loadPersistedDetections(): Detection[] {
+async function loadPersistedDetections(): Promise<Detection[]> {
   const rows = [
-    ...database.prepare('SELECT payload FROM detection_state ORDER BY updated_at DESC').all() as Array<{ payload: string }>,
-    ...database.prepare('SELECT payload FROM mobile_detections ORDER BY created_at DESC').all() as Array<{ payload: string }>,
+    ...await dbAll<{ payload: Detection | string }>('SELECT payload FROM detection_state ORDER BY updated_at DESC'),
+    ...await dbAll<{ payload: Detection | string }>('SELECT payload FROM mobile_detections ORDER BY created_at DESC'),
   ];
   const byId = new Map<string, Detection>();
   for (const row of rows) {
     try {
-      const detection = JSON.parse(row.payload) as Detection;
+      const detection = typeof row.payload === 'string' ? JSON.parse(row.payload) as Detection : row.payload;
       if (detection?.id && !byId.has(detection.id)) byId.set(detection.id, detection);
     } catch {
       console.error('[Database] Skipping malformed persisted detection payload.');
@@ -251,127 +270,122 @@ function loadPersistedDetections(): Detection[] {
   return [...byId.values()].slice(0, 200);
 }
 
-function persistDetection(detection: Detection) {
-  database.prepare(`
+async function persistDetection(detection: Detection) {
+  await dbRun(`
     INSERT INTO detection_state (id, payload, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
-  `).run(detection.id, JSON.stringify(detection), new Date().toISOString());
+  `, [detection.id, JSON.stringify(detection), new Date().toISOString()]);
+  if (isPostgres()) {
+    await dbRun(`
+      INSERT INTO detections (id, type, confidence, severity, latitude, longitude, location_name, bus_id, timestamp, evidence_image, status, department, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET type = excluded.type, confidence = excluded.confidence, severity = excluded.severity,
+        latitude = excluded.latitude, longitude = excluded.longitude, location_name = excluded.location_name,
+        bus_id = excluded.bus_id, timestamp = excluded.timestamp, evidence_image = excluded.evidence_image,
+        status = excluded.status, department = excluded.department, notes = excluded.notes
+    `, [detection.id, detection.type, detection.confidence, detection.severity, detection.latitude, detection.longitude,
+      detection.locationName, detection.busId, detection.timestamp, detection.evidenceImage, detection.status,
+      detection.department || null, detection.notes || null]);
+    const latestHistory = detection.history[0];
+    if (latestHistory) {
+      const alreadyStored = await dbGet<{ id: number | string }>(
+        'SELECT id FROM incident_history WHERE detection_id = ? AND timestamp = ? AND new_status = ?',
+        [detection.id, latestHistory.timestamp, latestHistory.newStatus]);
+      if (!alreadyStored) {
+        await dbRun(`
+          INSERT INTO incident_history (detection_id, previous_status, new_status, timestamp, changed_by, note)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `, [detection.id, latestHistory.previousStatus, latestHistory.newStatus, latestHistory.timestamp,
+          latestHistory.changedBy, latestHistory.note || null]);
+      }
+    }
+  }
 }
 
-let detections: Detection[] = loadPersistedDetections();
+let detections: Detection[] = [...INITIAL_DETECTIONS];
 let simulationRunning = true;
 let simulationSpeedMultiplier: 1 | 2 | 3 = 1;
 let detectionCounter = 129;
 
-const demoInference = new DemoInferenceService();
-
-// WebSocket Server on /ws/live
-const wss = new WebSocketServer({ server, path: '/ws/live' });
-const socketUsers = new WeakMap<WebSocket, AuthUser>();
-
-function broadcast(type: string, payload: any) {
-  const timestamp = new Date().toISOString();
-  wss.clients.forEach((client) => {
-    const user = socketUsers.get(client);
-    if (user && client.readyState === WebSocket.OPEN) {
-      try {
-        if (user.role !== 'main' && !['init:state', 'detection:new', 'detection:status_changed'].includes(type)) return;
-        if (type === 'detection:new' && !canAccessDetection(user, payload.detection)) return;
-        if (type === 'detection:status_changed' && !canAccessDetection(user, payload.detection)) return;
-        const scopedPayload = type === 'init:state' && user.role !== 'main'
-          ? { ...payload, buses: [], routes: [], detections: payload.detections.filter((detection: Detection) => canAccessDetection(user, detection)), simulation: undefined }
-          : payload;
-        client.send(JSON.stringify({ type, data: scopedPayload, timestamp }));
-      } catch (err) {
-        console.error('WS broadcast error:', err);
-      }
-    }
-  });
+async function loadSimulationState() {
+  const setting = await dbGet<{ value: unknown }>('SELECT value FROM app_settings WHERE key = ?', ['simulation']);
+  if (!setting) return;
+  const value = typeof setting.value === 'string' ? JSON.parse(setting.value) : setting.value as { isRunning?: boolean; speed?: number };
+  if (typeof value.isRunning === 'boolean') simulationRunning = value.isRunning;
+  if ([1, 2, 3].includes(Number(value.speed))) simulationSpeedMultiplier = Number(value.speed) as 1 | 2 | 3;
 }
 
-// Client connection handling
-wss.on('connection', (ws, req) => {
-  const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  const user = getUserByToken(requestUrl.searchParams.get('token') || undefined);
-  if (!user || !user.approved) {
-    ws.close(1008, 'Authentication required');
-    return;
-  }
-  socketUsers.set(ws, user);
-  console.log(`[WS] Client connected. Total clients: ${wss.clients.size}`);
+async function persistSimulationState() {
+  await dbRun(`
+    INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `, ['simulation', JSON.stringify({ isRunning: simulationRunning, speed: simulationSpeedMultiplier }), new Date().toISOString()]);
+}
 
-  const initialState = user.role === 'main' ? {
-    buses,
-    detections,
-    routes: INITIAL_ROUTES,
-    departments: DEPARTMENTS,
-    simulation: { isRunning: simulationRunning, speed: simulationSpeedMultiplier },
-    modelInfo: demoInference.getModelInfo(),
-  } : {
-    buses: [],
-    detections: detections.filter((detection) => canAccessDetection(user, detection)),
-    routes: [],
-    departments: [],
-    modelInfo: demoInference.getModelInfo(),
-  };
-  ws.send(JSON.stringify({
-    type: 'init:state',
-    data: initialState,
-    timestamp: new Date().toISOString(),
-  }));
+const demoInference = new DemoInferenceService();
+const liveWebSocketClients = new Set<any>();
 
+const wss = new WebSocketServer({ noServer: true });
+
+wss.on('connection', (ws) => {
+  liveWebSocketClients.add(ws);
   ws.on('message', (raw) => {
     try {
-      const parsed = JSON.parse(raw.toString());
-      handleClientCommand(parsed, ws, user);
-    } catch (e) {
-      console.error('Invalid WS message payload:', e);
+      const message = JSON.parse(String(raw));
+      if (message?.action === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', data: { ok: true } }));
+      }
+    } catch {
+      // Ignore non-JSON messages.
     }
   });
+  ws.on('close', () => liveWebSocketClients.delete(ws));
+  ws.on('error', () => liveWebSocketClients.delete(ws));
+});
 
-  ws.on('close', () => {
-    console.log(`[WS] Client disconnected. Remaining: ${wss.clients.size}`);
+server.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+  if (pathname !== '/ws/live') {
+    socket.destroy();
+    return;
+  }
+  const token = new URL(request.url || '/', 'http://localhost').searchParams.get('token');
+  if (!token) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    void (async () => {
+      const user = await getUserByToken(token);
+      if (!user || !user.approved) {
+        ws.send(JSON.stringify({ type: 'auth:error', data: { code: 'SESSION_EXPIRED', error: 'Session expired.' } }));
+        ws.close();
+        return;
+      }
+      wss.emit('connection', ws, request);
+      ws.send(JSON.stringify({ type: 'init:state', data: { buses, detections, routes: INITIAL_ROUTES, simulation: { isRunning: simulationRunning, speed: simulationSpeedMultiplier } } }));
+    })().catch(() => {
+      ws.close();
+    });
   });
 });
 
-function handleClientCommand(msg: { action: string; [key: string]: any }, sender: WebSocket, user: AuthUser) {
-  if (user.role !== 'main') {
-    const detection = detections.find((item) => item.id === msg.detectionId);
-    if (detection?.department !== user.department || !['in_progress', 'resolve'].includes(msg.action)) return;
-  }
-  switch (msg.action) {
-    case 'pause':
-      simulationRunning = false;
-      broadcast('simulation:updated', { isRunning: false, speed: simulationSpeedMultiplier });
-      break;
-    case 'resume':
-      simulationRunning = true;
-      broadcast('simulation:updated', { isRunning: true, speed: simulationSpeedMultiplier });
-      break;
-    case 'set_speed':
-      if ([1, 2, 3].includes(msg.speed)) {
-        simulationSpeedMultiplier = msg.speed;
-        broadcast('simulation:updated', { isRunning: simulationRunning, speed: simulationSpeedMultiplier });
-      }
-      break;
-    case 'trigger_detection':
-      triggerSimulatedDetection(msg.busId, msg.detectionType);
-      break;
-    case 'reset_demo':
-      resetSimulation();
-      break;
-    case 'verify':
-      updateIncidentStatus(msg.detectionId, 'verified', 'Command Authority (Quick WS)');
-      break;
-    case 'assign':
-      updateIncidentStatus(msg.detectionId, 'assigned', 'Command Authority (Quick WS)', msg.department);
-      break;
-    case 'in_progress':
-      updateIncidentStatus(msg.detectionId, 'in_progress', user.name);
-      break;
-    case 'resolve':
-      updateIncidentStatus(msg.detectionId, 'resolved', 'Field Inspector (Quick WS)', undefined, msg.notes);
-      break;
+async function broadcast(type: string, payload: any) {
+  const timestamp = new Date().toISOString();
+  if (!['detection:new', 'detection:status_changed'].includes(type)) return;
+  const detection = payload.detection as Detection | undefined;
+  const targetDepartment = detection?.department || null;
+  await dbRun(
+    'INSERT INTO realtime_events (event_type, payload, target_department, created_at) VALUES (?, ?, ?, ?)',
+    [type, JSON.stringify({ ...payload, timestamp }), targetDepartment, timestamp],
+  );
+
+  const eventPayload = JSON.stringify({ type, data: payload });
+  for (const client of [...liveWebSocketClients]) {
+    if (client.readyState === 1) {
+      client.send(eventPayload);
+    }
   }
 }
 
@@ -447,8 +461,6 @@ function tickSimulation() {
     };
   });
 
-  // Broadcast updated bus coordinates
-  broadcast('bus:fleet_tick', { buses });
 }
 
 // Trigger detection helper
@@ -516,7 +528,7 @@ async function triggerSimulatedDetection(selectedBusId?: string, forcedType?: st
 
   // Add to top of list
   detections = [newDetection, ...detections.slice(0, 199)];
-  persistDetection(newDetection);
+  await persistDetection(newDetection);
 
   // Update target bus stats
   targetBus.totalDetections += 1;
@@ -526,7 +538,7 @@ async function triggerSimulatedDetection(selectedBusId?: string, forcedType?: st
   };
 
   // Broadcast new detection event
-  broadcast('detection:new', {
+  await broadcast('detection:new', {
     detection: newDetection,
     bus: targetBus,
     notification: {
@@ -544,13 +556,13 @@ async function triggerSimulatedDetection(selectedBusId?: string, forcedType?: st
 }
 
 // Update incident status
-function updateIncidentStatus(
+async function updateIncidentStatus(
   id: string, 
   newStatus: IncidentStatus, 
   changedBy: string, 
   department?: Department, 
   note?: string
-): Detection | null {
+): Promise<Detection | null> {
   const index = detections.findIndex(d => d.id === id);
   if (index === -1) return null;
 
@@ -585,13 +597,13 @@ function updateIncidentStatus(
   };
 
   detections[index] = updated;
-  persistDetection(updated);
+  await persistDetection(updated);
   if (['assigned', 'in_progress', 'resolved'].includes(newStatus)) {
-    notifyDepartmentOfIncident(updated, changedBy);
+    await notifyDepartmentOfIncident(updated, changedBy);
   }
 
   // Broadcast status update
-  broadcast('detection:status_changed', {
+  await broadcast('detection:status_changed', {
     detection: updated,
     notification: {
       id: `NOTIF-${Date.now()}`,
@@ -606,26 +618,21 @@ function updateIncidentStatus(
   return updated;
 }
 
-function resetSimulation() {
+async function resetSimulation() {
   buses = JSON.parse(JSON.stringify(INITIAL_BUSES));
   simulationRunning = true;
   simulationSpeedMultiplier = 1;
-  broadcast('simulation:reset', {
-    buses,
-    detections,
-    simulation: { isRunning: true, speed: 1 },
-  });
+  await persistSimulationState();
 }
 
-// Run simulation tick every 2 seconds
-setInterval(tickSimulation, 2000);
-
-// Auto-generate realistic occasional detection every 14-25 seconds during active simulation
-setInterval(() => {
-  if (simulationRunning && Math.random() > 0.45) {
-    triggerSimulatedDetection();
-  }
-}, 18000);
+if (!process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+  const busTimer = setInterval(tickSimulation, 2000);
+  const detectionTimer = setInterval(() => {
+    if (simulationRunning && Math.random() > 0.45) void triggerSimulatedDetection();
+  }, 18000);
+  busTimer.unref();
+  detectionTimer.unref();
+}
 
 // ==================== REST API ROUTES ====================
 
@@ -728,33 +735,45 @@ app.post('/api/detections/video', (req, res, next) => {
   return res.status(200).json(result);
 });
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString() });
-});
+// Health check used by local diagnostics and frontend service-status checks.
+const healthCheck: express.RequestHandler = async (_req, res) => {
+  try {
+    await dbGet('SELECT 1');
+    res.json({ status: 'ok', database: databaseProvider(), time: new Date().toISOString() });
+  } catch (error) {
+    console.error('[Health] Database check failed:', error);
+    res.status(503).json({ status: 'error', database: 'unavailable', code: 'DATABASE_UNAVAILABLE' });
+  }
+};
+app.get('/health', healthCheck);
+app.get('/api/health', healthCheck);
 
 // Authentication is backed by SQLite so accounts survive browser refreshes and server restarts.
-app.post('/api/auth/signup', (req, res) => {
+app.post('/api/auth/signup', async (req, res) => {
   const name = String(req.body.name || '').trim();
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const requestedDepartment = String(req.body.department || '');
-  if (!name || !email || password.length < 4 || !DEPARTMENTS.includes(requestedDepartment as Department)) {
-    return res.status(400).json({ error: 'Name, valid department, and a password of at least 4 characters are required.' });
+  const requestedDepartmentValue = String(req.body.department || '').trim();
+  const requestedDepartment = requestedDepartmentValue && DEPARTMENTS.includes(requestedDepartmentValue as Department)
+    ? requestedDepartmentValue as Department
+    : null;
+  if (!name || !email || password.length < 4 || (requestedDepartmentValue && !requestedDepartment)) {
+    return res.status(400).json({ error: 'Name, email, and a password of at least 4 characters are required.' });
   }
 
   const credentials = hashPassword(password);
   try {
-    const result = database.prepare(`
+    await dbRun(`
       INSERT INTO users (name, email, password_hash, password_salt, role, requested_department, approved, created_at)
-      VALUES (?, ?, ?, ?, 'department', ?, 0, ?)
-    `).run(name, email, credentials.hash, credentials.salt, requestedDepartment, new Date().toISOString());
+      VALUES (?, ?, ?, ?, 'department', ?, FALSE, ?)
+    `, [name, email, credentials.hash, credentials.salt, requestedDepartment, new Date().toISOString()]);
     return res.status(202).json({ pendingApproval: true, message: 'Your account request was sent to the main branch for approval.' });
   } catch (error) {
     if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
-      return res.status(409).json({ error: 'An account with this email already exists.' });
+      return res.status(409).json({ code: 'ACCOUNT_EXISTS', error: 'An account with this email already exists.' });
     }
-    return res.status(500).json({ error: 'Unable to create the account.' });
+    console.error('[Auth] Signup failed:', error);
+    return res.status(500).json({ code: 'DATABASE_UNAVAILABLE', error: 'Unable to create the account because the authentication database failed.' });
   }
 });
 
@@ -762,15 +781,15 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   if (!email || email.length > 254) return res.status(400).json({ error: 'Enter a valid account email.' });
   const genericMessage = 'If an account exists for that email, password reset instructions have been sent.';
-  const account = database.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number } | undefined;
+  const account = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
   if (!account) return res.json({ message: genericMessage });
 
   const resetToken = randomBytes(32).toString('hex');
   const tokenHash = createHash('sha256').update(resetToken).digest('hex');
   const now = new Date();
-  database.prepare('DELETE FROM password_resets WHERE user_id = ?').run(account.id);
-  database.prepare('INSERT INTO password_resets (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
-    .run(tokenHash, account.id, new Date(now.getTime() + 30 * 60 * 1000).toISOString(), now.toISOString());
+  await dbRun('DELETE FROM password_resets WHERE user_id = ?', [account.id]);
+  await dbRun('INSERT INTO password_resets (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)',
+    [tokenHash, account.id, new Date(now.getTime() + 30 * 60 * 1000).toISOString(), now.toISOString()]);
 
   const resendKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.AUTH_FROM_EMAIL;
@@ -789,7 +808,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       if (!delivery.ok) throw new Error(`Email provider responded with ${delivery.status}`);
       return res.json({ message: genericMessage });
     } catch (error) {
-      database.prepare('DELETE FROM password_resets WHERE token_hash = ?').run(tokenHash);
+      await dbRun('DELETE FROM password_resets WHERE token_hash = ?', [tokenHash]);
       console.error('[Auth] Password reset email delivery failed:', error);
       return res.status(503).json({ error: 'Password reset email could not be sent. Please contact your administrator.' });
     }
@@ -798,89 +817,105 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   if (process.env.NODE_ENV !== 'production') {
     return res.json({ message: genericMessage, developmentToken: resetToken });
   }
-  database.prepare('DELETE FROM password_resets WHERE token_hash = ?').run(tokenHash);
+  await dbRun('DELETE FROM password_resets WHERE token_hash = ?', [tokenHash]);
   return res.status(503).json({ error: 'Password reset delivery is not configured. Please contact your administrator.' });
 });
 
-app.post('/api/auth/reset-password', (req, res) => {
+app.post('/api/auth/reset-password', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const token = String(req.body.token || '').trim();
   const password = String(req.body.password || '');
   if (!email || !token || password.length < 4) {
     return res.status(400).json({ error: 'Email, reset token, and a password of at least 4 characters are required.' });
   }
-  const user = database.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number } | undefined;
+  const user = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
   if (!user) return res.status(400).json({ error: 'Reset token is invalid or expired.' });
   const tokenHash = createHash('sha256').update(token).digest('hex');
-  const reset = database.prepare(`
+  const reset = await dbGet<{ token_hash: string }>(`
     SELECT token_hash FROM password_resets
     WHERE token_hash = ? AND user_id = ? AND expires_at > ?
-  `).get(tokenHash, user.id, new Date().toISOString()) as { token_hash: string } | undefined;
+  `, [tokenHash, user.id, new Date().toISOString()]);
   if (!reset) return res.status(400).json({ error: 'Reset token is invalid or expired.' });
 
   const credentials = hashPassword(password);
-  database.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?')
-    .run(credentials.hash, credentials.salt, user.id);
-  database.prepare('DELETE FROM password_resets WHERE user_id = ?').run(user.id);
-  database.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+  await dbRun('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?', [credentials.hash, credentials.salt, user.id]);
+  await dbRun('DELETE FROM password_resets WHERE user_id = ?', [user.id]);
+  await dbRun('DELETE FROM sessions WHERE user_id = ?', [user.id]);
   return res.json({ message: 'Password updated. Sign in using your new password.' });
 });
 
-app.post('/api/auth/login', (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const password = String(req.body.password || '');
-  const accountType = String(req.body.accountType || 'department');
-  const record = database.prepare('SELECT id, name, email, password_hash, password_salt, role, department, approved FROM users WHERE email = ?')
-    .get(email) as (UserRecord & { password_hash: string; password_salt: string }) | undefined;
-  if (!record) return res.status(401).json({ error: 'Invalid email or password.' });
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    const accountType = req.body.accountType == null ? null : String(req.body.accountType);
+    if (accountType !== null && !['main', 'department'].includes(accountType)) {
+      return res.status(400).json({ code: 'INVALID_AUTHORITY_TYPE', error: 'Choose a valid authority desk.' });
+    }
+    const record = await dbGet<UserRecord>('SELECT id, name, email, password_hash, password_salt, role, department, approved FROM users WHERE email = ?', [email]);
+    if (!record || !record.password_hash || !record.password_salt) return res.status(401).json({ code: 'INVALID_CREDENTIALS', error: 'Invalid email or password.' });
 
-  const suppliedHash = Buffer.from(hashPassword(password, record.password_salt).hash, 'hex');
-  const storedHash = Buffer.from(record.password_hash, 'hex');
-  if (suppliedHash.length !== storedHash.length || !timingSafeEqual(suppliedHash, storedHash)) {
-    return res.status(401).json({ error: 'Invalid email or password.' });
+    const suppliedHash = Buffer.from(hashPassword(password, record.password_salt).hash, 'hex');
+    const storedHash = Buffer.from(record.password_hash, 'hex');
+    if (suppliedHash.length !== storedHash.length || !timingSafeEqual(suppliedHash, storedHash)) {
+      return res.status(401).json({ code: 'INVALID_CREDENTIALS', error: 'Invalid email or password.' });
+    }
+    if (accountType !== null && record.role !== accountType) {
+      return res.status(403).json({ code: 'AUTHORITY_TYPE_MISMATCH', error: 'This account is not authorized for the selected authority desk.' });
+    }
+    if (!record.approved) {
+      return res.status(403).json({ code: 'DEPARTMENT_PENDING', error: 'Your department access is awaiting main-branch approval.' });
+    }
+
+    return res.json(await createSession({
+      id: Number(record.id),
+      name: record.name,
+      email: record.email,
+      role: record.role,
+      department: record.department,
+      approved: Boolean(record.approved),
+    }));
+  } catch (error) {
+    console.error('[Auth] Login failed:', error);
+    return res.status(500).json({ code: 'DATABASE_UNAVAILABLE', error: 'Authentication could not complete because the user database failed.' });
   }
-  if (record.role !== accountType) return res.status(401).json({ error: 'This account does not have that authority type.' });
-  if (!record.approved) return res.status(403).json({ error: 'Your department access is awaiting main-branch approval.' });
-
-  return res.json(createSession({
-    id: record.id,
-    name: record.name,
-    email: record.email,
-    role: record.role,
-    department: record.department,
-    approved: Boolean(record.approved),
-  }));
 });
 
-app.get('/api/auth/me', (req, res) => {
-  const user = getUserByToken(getBearerToken(req));
-  if (!user) return res.status(401).json({ error: 'Session expired.' });
-  if (!user.approved) return res.status(403).json({ error: 'Your department access is awaiting main-branch approval.' });
-  return res.json({ user });
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const user = await getUserByToken(getBearerToken(req));
+    if (!user) return res.status(401).json({ code: 'SESSION_EXPIRED', error: 'Session expired.' });
+    if (!user.approved) return res.status(403).json({ code: 'DEPARTMENT_PENDING', error: 'Your department access is awaiting main-branch approval.' });
+    return res.json({ user });
+  } catch (error) {
+    console.error('[Auth] Session lookup failed:', error);
+    return res.status(500).json({ code: 'DATABASE_UNAVAILABLE', error: 'Authentication database is unavailable.' });
+  }
 });
 
-app.get('/api/admin/authority-requests', (req, res) => {
-  if (!requireMainBranch(req, res)) return;
-  const requests = database.prepare(`
+app.get('/api/admin/authority-requests', async (req, res) => {
+  if (!await requireMainBranch(req, res)) return;
+  const requests = await dbAll(`
     SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
-    FROM users WHERE role = 'department' AND approved = 0 ORDER BY created_at ASC
-  `).all();
+    FROM users WHERE role = 'department' AND approved = FALSE ORDER BY created_at ASC
+  `);
   res.json({ requests });
 });
 
 app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
-  const approver = requireMainBranch(req, res);
+  const approver = await requireMainBranch(req, res);
   if (!approver) return;
   const department = String(req.body.department || '');
   if (!DEPARTMENTS.includes(department as Department)) {
     return res.status(400).json({ error: 'Choose a valid department.' });
   }
-  const result = database.prepare(`
-    UPDATE users SET department = ?, approved = 1
-    WHERE id = ? AND role = 'department' AND approved = 0
-  `).run(department, Number(req.params.id));
+  const result = await dbRun(`
+    UPDATE users SET department = ?, approved = TRUE
+    WHERE id = ? AND role = 'department' AND approved = FALSE
+  `, [department, Number(req.params.id)]);
   if (!result.changes) return res.status(404).json({ error: 'Authority request not found.' });
-  const account = database.prepare('SELECT name, email FROM users WHERE id = ?').get(Number(req.params.id)) as { name: string; email: string };
+  const account = await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE id = ?', [Number(req.params.id)]);
+  if (!account) return res.status(404).json({ error: 'Authority request not found.' });
   let emailSent = false;
   try {
     emailSent = await sendAuthorityEmail(
@@ -901,22 +936,54 @@ app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
   res.json({ approved: true, department, emailSent, approvedBy: approver.name });
 });
 
-app.post('/api/auth/logout', (req, res) => {
+app.post('/api/auth/logout', async (req, res) => {
   const token = getBearerToken(req);
-  if (token) database.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  if (token) await dbRun('DELETE FROM sessions WHERE token = ?', [hashSessionToken(token)]);
   return res.status(204).send();
 });
 
+app.get('/api/live/state', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  const state = {
+    buses: user.role === 'main' ? buses : [],
+    detections: user.role === 'main' ? detections : detections.filter((item) => canAccessDetection(user, item)),
+    routes: user.role === 'main' ? INITIAL_ROUTES : [],
+    simulation: user.role === 'main' ? { isRunning: simulationRunning, speed: simulationSpeedMultiplier } : undefined,
+    modelInfo: demoInference.getModelInfo(),
+  };
+  res.json(state);
+});
+
+app.get('/api/live/events', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  const afterId = Math.max(0, Number(req.query.after) || 0);
+  const requestedLimit = Math.max(1, Number(req.query.limit) || 100);
+  const limit = Math.min(250, requestedLimit);
+  const events = user.role === 'main'
+    ? await dbAll<{ id: number | string; event_type: string; payload: unknown; created_at: string }>(
+        'SELECT id, event_type, payload, created_at FROM realtime_events WHERE id > ? ORDER BY id ASC LIMIT ?', [afterId, limit])
+    : await dbAll<{ id: number | string; event_type: string; payload: unknown; created_at: string }>(
+        'SELECT id, event_type, payload, created_at FROM realtime_events WHERE id > ? AND target_department = ? ORDER BY id ASC LIMIT ?', [afterId, user.department, limit]);
+  res.json({ events: events.map((event) => ({
+    id: Number(event.id),
+    type: event.event_type,
+    data: typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload,
+    timestamp: event.created_at,
+  })) });
+});
+
 // Buses
-app.get('/api/buses', (req, res) => {
-  const user = requireUser(req, res);
+app.get('/api/buses', async (req, res) => {
+  const user = await requireUser(req, res);
   if (!user) return;
   if (user.role !== 'main') return res.json({ buses: [], count: 0 });
   res.json({ buses, count: buses.length });
 });
 
-app.get('/api/buses/:id', (req, res) => {
-  const user = requireUser(req, res);
+app.get('/api/buses/:id', async (req, res) => {
+  const user = await requireUser(req, res);
   if (!user) return;
   if (user.role !== 'main') return res.status(403).json({ error: 'Fleet details are restricted to main branch.' });
   const bus = buses.find(b => b.id === req.params.id);
@@ -926,7 +993,7 @@ app.get('/api/buses/:id', (req, res) => {
 
 // Detections
 app.post('/api/detections/mobile', async (req, res) => {
-  const user = requireMainBranch(req, res);
+  const user = await requireMainBranch(req, res);
   if (!user) return;
 
   const detectionType = req.body.detectionType as DetectionType;
@@ -978,9 +1045,9 @@ app.post('/api/detections/mobile', async (req, res) => {
   };
 
   detections = [detection, ...detections.slice(0, 199)];
-  database.prepare('INSERT INTO mobile_detections (id, user_id, payload, created_at) VALUES (?, ?, ?, ?)')
-    .run(detection.id, user.id, JSON.stringify(detection), new Date().toISOString());
-  persistDetection(detection);
+  await dbRun('INSERT INTO mobile_detections (id, user_id, payload, created_at) VALUES (?, ?, ?, ?)',
+    [detection.id, user.id, JSON.stringify(detection), new Date().toISOString()]);
+  await persistDetection(detection);
   broadcast('detection:new', {
     detection,
     notification: {
@@ -995,8 +1062,8 @@ app.post('/api/detections/mobile', async (req, res) => {
   return res.status(201).json({ detection });
 });
 
-app.get('/api/detections', (req, res) => {
-  const user = requireUser(req, res);
+app.get('/api/detections', async (req, res) => {
+  const user = await requireUser(req, res);
   if (!user) return;
   const { type, severity, status, bus_id } = req.query;
   let filtered = user.role === 'main'
@@ -1009,8 +1076,8 @@ app.get('/api/detections', (req, res) => {
   res.json({ detections: filtered, total: filtered.length });
 });
 
-app.get('/api/detections/:id', (req, res) => {
-  const user = requireUser(req, res);
+app.get('/api/detections/:id', async (req, res) => {
+  const user = await requireUser(req, res);
   if (!user) return;
   const detection = detections.find(d => d.id === req.params.id);
   if (!detection) return res.status(404).json({ error: 'Detection not found' });
@@ -1018,8 +1085,8 @@ app.get('/api/detections/:id', (req, res) => {
   res.json(detection);
 });
 
-app.post('/api/detections/import-video', (req, res) => {
-  const user = requireMainBranch(req, res);
+app.post('/api/detections/import-video', async (req, res) => {
+  const user = await requireMainBranch(req, res);
   if (!user) return;
   const incoming = req.body.detections;
   if (!Array.isArray(incoming) || incoming.length < 1 || incoming.length > 50) {
@@ -1069,76 +1136,76 @@ app.post('/api/detections/import-video', (req, res) => {
     imported.push(detection);
   }
 
-  for (const detection of imported) persistDetection(detection);
+  for (const detection of imported) await persistDetection(detection);
   detections = [...imported.reverse(), ...detections].slice(0, 200);
   for (const detection of imported) {
-    broadcast('detection:new', { detection });
+    await broadcast('detection:new', { detection });
   }
   return res.status(201).json({ detections: imported });
 });
 
-app.post('/api/detections/:id/verify', (req, res) => {
-  const user = requireMainBranch(req, res);
+app.post('/api/detections/:id/verify', async (req, res) => {
+  const user = await requireMainBranch(req, res);
   if (!user) return;
-  const updated = updateIncidentStatus(req.params.id, 'verified', user.name);
+  const updated = await updateIncidentStatus(req.params.id, 'verified', user.name);
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
-app.post('/api/detections/:id/reject', (req, res) => {
-  const user = requireMainBranch(req, res);
+app.post('/api/detections/:id/reject', async (req, res) => {
+  const user = await requireMainBranch(req, res);
   if (!user) return;
-  const updated = updateIncidentStatus(req.params.id, 'rejected', user.name, undefined, req.body.reason || 'False positive detection');
+  const updated = await updateIncidentStatus(req.params.id, 'rejected', user.name, undefined, req.body.reason || 'False positive detection');
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
-app.post('/api/detections/:id/assign', (req, res) => {
-  const user = requireMainBranch(req, res);
+app.post('/api/detections/:id/assign', async (req, res) => {
+  const user = await requireMainBranch(req, res);
   if (!user) return;
   const { department, note } = req.body;
   if (!department) return res.status(400).json({ error: 'Department is required' });
   if (!DEPARTMENTS.includes(department as Department)) return res.status(400).json({ error: 'Choose a valid department.' });
-  const updated = updateIncidentStatus(req.params.id, 'assigned', user.name, department, note);
+  const updated = await updateIncidentStatus(req.params.id, 'assigned', user.name, department, note);
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
-app.post('/api/detections/:id/in-progress', (req, res) => {
-  const user = requireUser(req, res);
+app.post('/api/detections/:id/in-progress', async (req, res) => {
+  const user = await requireUser(req, res);
   if (!user) return;
   const detection = detections.find((item) => item.id === req.params.id);
   if (!detection) return res.status(404).json({ error: 'Detection not found' });
   if (user.role !== 'main' && (detection.department !== user.department || detection.status !== 'assigned')) {
     return res.status(403).json({ error: 'You can only mobilize incidents assigned to your department.' });
   }
-  const updated = updateIncidentStatus(req.params.id, 'in_progress', user.name, undefined, req.body.note || 'Field repair units mobilized on site');
+  const updated = await updateIncidentStatus(req.params.id, 'in_progress', user.name, undefined, req.body.note || 'Field repair units mobilized on site');
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
-app.post('/api/detections/:id/resolve', (req, res) => {
-  const user = requireUser(req, res);
+app.post('/api/detections/:id/resolve', async (req, res) => {
+  const user = await requireUser(req, res);
   if (!user) return;
   const detection = detections.find((item) => item.id === req.params.id);
   if (!detection) return res.status(404).json({ error: 'Detection not found' });
   if (user.role !== 'main' && (detection.department !== user.department || detection.status !== 'in_progress')) {
     return res.status(403).json({ error: 'You can only resolve incidents in progress for your department.' });
   }
-  const updated = updateIncidentStatus(req.params.id, 'resolved', user.name, undefined, req.body.resolutionNotes || 'Pavement restored and inspected');
+  const updated = await updateIncidentStatus(req.params.id, 'resolved', user.name, undefined, req.body.resolutionNotes || 'Pavement restored and inspected');
   if (!updated) return res.status(404).json({ error: 'Detection not found' });
   res.json(updated);
 });
 
 // Routes
-app.get('/api/routes', (req, res) => {
-  if (!requireMainBranch(req, res)) return;
+app.get('/api/routes', async (req, res) => {
+  if (!await requireMainBranch(req, res)) return;
   res.json(INITIAL_ROUTES);
 });
 
 // Analytics
-app.get('/api/analytics', (req, res) => {
-  if (!requireMainBranch(req, res)) return;
+app.get('/api/analytics', async (req, res) => {
+  if (!await requireMainBranch(req, res)) return;
   const byType: Record<string, number> = {
     pothole: 0,
     road_damage: 0,
@@ -1192,11 +1259,11 @@ app.get('/api/analytics', (req, res) => {
 });
 
 // System Health
-app.get('/api/system/health', (req, res) => {
-  if (!requireMainBranch(req, res)) return;
+app.get('/api/system/health', async (req, res) => {
+  if (!await requireMainBranch(req, res)) return;
   const activeBuses = buses.filter(b => b.status === 'active').length;
   res.json({
-    webSocketStatus: 'connected',
+    webSocketStatus: 'disconnected',
     apiStatus: 'healthy',
     databaseStatus: 'connected',
     gpsStreamStatus: 'active',
@@ -1207,14 +1274,14 @@ app.get('/api/system/health', (req, res) => {
     cpuUsage: 24.2,
     memoryUsage: 38.6,
     messagesPerSecond: 18,
-    activeClients: wss.clients.size,
+    activeClients: 0,
     modelName: demoInference.getModelInfo().name,
   });
 });
 
 // Simulation controls
 app.post('/api/simulation/control', async (req, res) => {
-  if (!requireMainBranch(req, res)) return;
+  if (!await requireMainBranch(req, res)) return;
   const { action, speed, busId, detectionType } = req.body;
   if (action === 'pause') {
     simulationRunning = false;

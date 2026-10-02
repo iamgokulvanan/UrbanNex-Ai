@@ -23,8 +23,8 @@ interface RealVideoDetectionProps {
 }
 
 const supportedExtensions = ['.mp4', '.mov', '.avi', '.mkv'];
-const configuredBackendUrl = (import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
-const backendUrl = import.meta.env.DEV ? configuredBackendUrl : '';
+const configuredBackendUrl = (import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+const backendUrl = configuredBackendUrl || (import.meta.env.DEV ? 'http://localhost:3000' : window.location.origin);
 const maxVideoBytes = 200 * 1024 * 1024;
 
 function formatTimestamp(seconds: number) {

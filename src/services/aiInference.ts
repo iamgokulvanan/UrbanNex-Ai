@@ -1,4 +1,4 @@
-import { DetectionType, SeverityLevel, BoundingBox } from '../types';
+import { DetectionType, SeverityLevel, BoundingBox } from '../types/index.ts';
 
 export interface FrameInput {
   timestamp: string;

@@ -9,8 +9,8 @@ from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, D
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .ai_inference import DemoInferenceService
-from .pothole_detector import PotholeDetector, PotholeModelError
+from ai_inference import DemoInferenceService
+from pothole_detector import PotholeDetector, PotholeModelError
 
 app = FastAPI(
     title="UrbanNex AI Command Center Backend",

@@ -31,14 +31,42 @@ import {
   AlertOctagon
 } from 'lucide-react';
 
+class ApiResponseError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+  }
+}
+
 async function readApiResponse(response: Response) {
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
-    throw new Error(response.ok
-      ? 'The authentication service returned an invalid response.'
-      : 'The authentication service is unavailable. Please try again shortly.');
+    const message = response.status === 404
+      ? 'The authentication API route was not found (HTTP 404). Check that the backend API function is deployed.'
+      : response.status >= 500
+        ? `The authentication backend returned HTTP ${response.status}. Check the server and database logs.`
+        : `The authentication API returned an unexpected HTTP ${response.status} response.`;
+    throw new ApiResponseError(
+      message,
+      response.status,
+      'INVALID_API_RESPONSE',
+    );
   }
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    throw new ApiResponseError('The API returned malformed JSON.', response.status, 'INVALID_API_RESPONSE');
+  }
+}
+
+function getApiBaseUrl() {
+  const configuredBaseUrl = (import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+  if (configuredBaseUrl) return configuredBaseUrl;
+  if (import.meta.env.DEV) return 'http://localhost:3000';
+  return window.location.origin;
+}
+
+function apiUrl(path: string) {
+  return `${getApiBaseUrl()}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
 export default function App() {
@@ -76,7 +104,7 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
   const [authSubmitting, setAuthSubmitting] = useState(false);
-  const [authorityRequests, setAuthorityRequests] = useState<Array<{ id: number; name: string; email: string; requestedDepartment: Department; createdAt: string }>>([]);
+  const [authorityRequests, setAuthorityRequests] = useState<Array<{ id: number; name: string; email: string; requestedDepartment: Department | null; createdAt: string }>>([]);
   const [authorityError, setAuthorityError] = useState('');
   const [authorityNotice, setAuthorityNotice] = useState('');
 
@@ -88,7 +116,7 @@ export default function App() {
       setUser(null);
       return;
     }
-    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${sessionToken}` } })
+    fetch(apiUrl('/api/auth/me'), { headers: { Authorization: `Bearer ${sessionToken}` } })
       .then(async (response) => {
         if (!response.ok) throw new Error('Your session has expired. Please sign in again.');
         const data = await readApiResponse(response);
@@ -138,63 +166,74 @@ export default function App() {
       .map(detection => ({ id: detection.id, label: detection.id, detail: `${detection.type.replace('_', ' ')} · ${detection.locationName}`, kind: 'detection' as const })),
   ].slice(0, 8) : [];
 
-  const handleAuthSubmit = async ({ name, email, password, accountType, department }: { name: string; email: string; password: string; accountType: 'main' | 'department'; department: Department }) => {
+  const handleAuthSubmit = async ({ name, email, password, accountType, department }: { name: string; email: string; password: string; accountType?: 'main' | 'department'; department?: Department }) => {
     setAuthSubmitting(true);
     setAuthError('');
     const normalizedEmail = email.trim().toLowerCase();
+    const endpoint = `/api/auth/${authMode === 'signup' ? 'signup' : 'login'}`;
     try {
-      const response = await fetch(`/api/auth/${authMode === 'signup' ? 'signup' : 'login'}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password, accountType, department }),
-      });
+      let response: Response;
+      try {
+        response = await fetch(apiUrl(endpoint), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password, accountType, department }),
+        });
+      } catch {
+        let healthAvailable = false;
+        try {
+          const healthResponse = await fetch(apiUrl('/api/health'), { cache: 'no-store' });
+          healthAvailable = healthResponse.ok && (healthResponse.headers.get('content-type') || '').includes('application/json');
+        } catch {
+          healthAvailable = false;
+        }
+        throw new ApiResponseError(
+          healthAvailable
+            ? `The backend is running, but ${endpoint} could not be reached. Check the deployed API route.`
+            : `Cannot reach the UrbanNex backend at ${getApiBaseUrl()}. Configure VITE_API_BASE_URL in the frontend environment and retry.`,
+          0,
+          healthAvailable ? 'AUTH_ROUTE_UNAVAILABLE' : 'BACKEND_UNAVAILABLE',
+        );
+      }
       const data = await readApiResponse(response);
       if (response.status === 202 && data.pendingApproval) {
         setAuthError(data.message);
         setAuthMode('login');
         return;
       }
-      if (!response.ok) throw new Error(data.error || 'Unable to authenticate.');
+      if (!response.ok) {
+        throw new ApiResponseError(data.error || 'Unable to authenticate.', response.status, data.code);
+      }
       localStorage.setItem('urbannex-token', data.token);
       setSessionToken(data.token);
       setUser(data.user);
       setAuthMode(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to authenticate.';
-      if (message.startsWith('The authentication service')) {
-        setAuthError('The authority service is required for secure sign-in and department assignment. Start the backend and try again.');
+      if (error instanceof ApiResponseError) {
+        if (error.code === 'INVALID_CREDENTIALS') {
+          setAuthError('Email or password is incorrect.');
+        } else if (error.code === 'AUTHORITY_TYPE_MISMATCH') {
+          setAuthError('This account is not authorized for the selected authority desk.');
+        } else if (error.code === 'DEPARTMENT_PENDING') {
+          setAuthError('Department access is waiting for main-branch approval.');
+        } else if (error.code === 'DATABASE_UNAVAILABLE') {
+          setAuthError('The authentication database is unavailable. Check the backend database configuration.');
+        } else if (error.status >= 500) {
+          setAuthError(`Authentication service error (HTTP ${error.status}). Check the backend logs.`);
+        } else {
+          setAuthError(error.message);
+        }
       } else {
-        setAuthError(message);
+        setAuthError(error instanceof Error ? error.message : 'Unable to authenticate.');
       }
     } finally {
       setAuthSubmitting(false);
     }
   };
 
-  const requestPasswordReset = async (email: string) => {
-    const response = await fetch('/api/auth/forgot-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Could not request a password reset.');
-    return data as { message?: string; developmentToken?: string };
-  };
-
-  const resetAccountPassword = async (email: string, token: string, password: string) => {
-    const response = await fetch('/api/auth/reset-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, token, password }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Could not reset the password.');
-  };
-
   const loadAuthorityRequests = async (token: string) => {
     try {
-      const response = await fetch('/api/admin/authority-requests', { headers: { Authorization: `Bearer ${token}` } });
+      const response = await fetch(apiUrl('/api/admin/authority-requests'), { headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) throw new Error('Could not load department access requests.');
       const data = await response.json();
       setAuthorityRequests(data.requests);
@@ -206,7 +245,7 @@ export default function App() {
 
   const approveAuthorityRequest = async (id: number, department: Department) => {
     if (!sessionToken) return;
-    const response = await fetch(`/api/admin/authority-requests/${id}/approve`, {
+    const response = await fetch(apiUrl(`/api/admin/authority-requests/${id}/approve`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
       body: JSON.stringify({ department }),
@@ -225,7 +264,7 @@ export default function App() {
 
   const handleLogout = () => {
     if (sessionToken) {
-      fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${sessionToken}` } }).catch(() => {});
+      fetch(apiUrl('/api/auth/logout'), { method: 'POST', headers: { Authorization: `Bearer ${sessionToken}` } }).catch(() => {});
     }
     setUser(null);
     setSessionToken(null);
@@ -310,7 +349,7 @@ export default function App() {
       });
 
     if (!mapped.length) return;
-    const response = await fetch('/api/detections/import-video', {
+    const response = await fetch(apiUrl('/api/detections/import-video'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -334,7 +373,7 @@ export default function App() {
     timestamp: string;
     evidenceImage?: string;
   }) => {
-    const response = await fetch('/api/detections/mobile', {
+    const response = await fetch(apiUrl('/api/detections/mobile'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -352,8 +391,6 @@ export default function App() {
         mode={authMode === 'signup' ? 'signup' : 'login'}
         onModeChange={setAuthMode}
         onSubmit={handleAuthSubmit}
-        onForgotPassword={requestPasswordReset}
-        onResetPassword={resetAccountPassword}
         errorMessage={authError}
         isSubmitting={authSubmitting}
       />
@@ -462,9 +499,9 @@ export default function App() {
                   <div className="min-w-0">
                     <h2 className="text-sm font-bold text-slate-900">{request.name}</h2>
                     <p className="truncate text-xs text-slate-500">{request.email}</p>
-                    <p className="mt-1 text-xs text-slate-600">Requested: {request.requestedDepartment}</p>
+                    <p className="mt-1 text-xs text-slate-600">Requested: {request.requestedDepartment || 'Not specified'}</p>
                   </div>
-                  <select aria-label={`Assign department to ${request.name}`} defaultValue={request.requestedDepartment} id={`department-${request.id}`} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800">
+                  <select aria-label={`Assign department to ${request.name}`} defaultValue={request.requestedDepartment || DEPARTMENTS[0]} id={`department-${request.id}`} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800">
                     {DEPARTMENTS.map((department) => <option key={department} value={department}>{department}</option>)}
                   </select>
                   <button onClick={() => {

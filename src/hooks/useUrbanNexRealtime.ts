@@ -11,6 +11,23 @@ import {
 } from '../types';
 import { INITIAL_BUSES, INITIAL_DETECTIONS, INITIAL_ROUTES } from '../data/seedData';
 
+function getApiBaseUrl() {
+  const configuredBaseUrl = (import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+  if (configuredBaseUrl) return configuredBaseUrl;
+  return import.meta.env.DEV ? 'http://localhost:3000' : window.location.origin;
+}
+
+function getWebSocketBaseUrl() {
+  const configuredBaseUrl = (import.meta.env.VITE_WS_URL || import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+  if (configuredBaseUrl) return configuredBaseUrl.startsWith('ws') ? configuredBaseUrl : configuredBaseUrl.replace(/^http/, 'ws');
+  const origin = import.meta.env.DEV ? 'http://localhost:3000' : window.location.origin;
+  return origin.replace(/^http/, 'ws');
+}
+
+function apiUrl(path: string) {
+  return `${getApiBaseUrl()}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 export function useUrbanNexRealtime() {
   const sessionToken = typeof window !== 'undefined' ? localStorage.getItem('urbannex-token') : null;
   const demoMode = sessionToken?.startsWith('urbannex-demo:') ?? false;
@@ -70,164 +87,118 @@ export function useUrbanNexRealtime() {
     })),
   });
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<any>(null);
+  const pollingRef = useRef<number | null>(null);
+  const eventCursorRef = useRef<number>(0);
 
-  const connectWebSocket = useCallback(() => {
+  const pollLiveData = useCallback(async () => {
+    if (!sessionToken || demoMode) return;
+    const headers = { Authorization: `Bearer ${sessionToken}` };
+
     try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.host;
-      if (!sessionToken || demoMode) return;
-      const wsUrl = `${protocol}//${host}/ws/live?token=${encodeURIComponent(sessionToken)}`;
-
-      console.log('[UrbanNex Client] Connecting to WebSocket:', wsUrl);
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('[UrbanNex Client] Connected to /ws/live');
-        setWsConnected(true);
-        setSystemHealth(prev => ({ ...prev, webSocketStatus: 'connected' }));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          const { type, data } = payload;
-
-          if (type === 'init:state') {
-            if (data.buses) setBuses(data.buses);
-            if (data.detections) setDetections(data.detections);
-            if (data.routes) setRoutes(data.routes);
-            if (data.simulation) {
-              setSimulation(prev => ({
-                ...prev,
-                isRunning: data.simulation.isRunning,
-                speed: data.simulation.speed,
-              }));
-            }
-          } else if (type === 'bus:fleet_tick') {
-            if (data.buses) {
-              setBuses(data.buses);
-              // Also update selectedBus if open
-              setSelectedBus(prev => {
-                if (!prev) return null;
-                const updated = data.buses.find((b: Bus) => b.id === prev.id);
-                return updated || prev;
-              });
-            }
-          } else if (type === 'detection:new') {
-            const newDet: Detection = data.detection;
-            setDetections(prev => {
-              if (prev.some(d => d.id === newDet.id)) return prev;
-              return [newDet, ...prev];
-            });
-
-            if (data.notification) {
-              setNotifications(prev => [data.notification, ...prev.slice(0, 24)]);
-            }
-
-            setSimulation(prev => ({
-              ...prev,
-              totalEventsGenerated: prev.totalEventsGenerated + 1,
-              lastEventTime: new Date().toLocaleTimeString(),
-            }));
-          } else if (type === 'detection:status_changed') {
-            const updatedDet: Detection = data.detection;
-            setDetections(prev => prev.map(d => d.id === updatedDet.id ? updatedDet : d));
-            setSelectedDetection(prev => prev && prev.id === updatedDet.id ? updatedDet : prev);
-
-            if (data.notification) {
-              setNotifications(prev => [data.notification, ...prev.slice(0, 24)]);
-            }
-          } else if (type === 'simulation:updated') {
-            setSimulation(prev => ({
-              ...prev,
-              isRunning: data.isRunning,
-              speed: data.speed,
-            }));
-          } else if (type === 'simulation:reset') {
-            setBuses(data.buses);
-            setDetections(data.detections);
-            setSimulation(prev => ({
-              ...prev,
-              isRunning: data.simulation.isRunning,
-              speed: data.simulation.speed,
-            }));
-          }
-        } catch (err) {
-          console.error('[UrbanNex Client] Error parsing WS message:', err);
+      const stateResponse = await fetch(apiUrl('/api/live/state'), { headers });
+      if (stateResponse.ok) {
+        const state = await stateResponse.json();
+        if (state.buses) setBuses(state.buses);
+        if (state.detections) setDetections(state.detections);
+        if (state.routes) setRoutes(state.routes);
+        if (state.simulation) {
+          setSimulation(prev => ({
+            ...prev,
+            isRunning: state.simulation.isRunning,
+            speed: state.simulation.speed,
+          }));
         }
-      };
+      }
+    } catch (error) {
+      console.warn('[UrbanNex Client] Live state poll failed:', error);
+    }
 
-      ws.onclose = () => {
-        console.warn('[UrbanNex Client] WS disconnected. Reconnecting in 3s...');
-        setWsConnected(false);
-        setSystemHealth(prev => ({ ...prev, webSocketStatus: 'disconnected' }));
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 3000);
-      };
+    try {
+      const eventsResponse = await fetch(`${apiUrl('/api/live/events')}?after=${eventCursorRef.current}&limit=25`, { headers });
+      if (!eventsResponse.ok) return;
+      const eventsPayload = await eventsResponse.json();
+      const events = Array.isArray(eventsPayload.events) ? eventsPayload.events : [];
+      for (const event of events) {
+        eventCursorRef.current = Math.max(eventCursorRef.current, Number(event.id || 0));
+        const { type, data } = event;
 
-      ws.onerror = (err) => {
-        console.error('[UrbanNex Client] WS Error:', err);
-        ws.close();
-      };
-    } catch (e) {
-      console.error('[UrbanNex Client] WebSocket init failed:', e);
-      reconnectTimeoutRef.current = setTimeout(connectWebSocket, 4000);
+        if (type === 'detection:new') {
+          const newDet: Detection = data.detection;
+          setDetections(prev => (prev.some(d => d.id === newDet.id) ? prev : [newDet, ...prev]));
+          if (data.notification) {
+            setNotifications(prev => [data.notification, ...prev.slice(0, 24)]);
+          }
+        } else if (type === 'detection:status_changed') {
+          const updatedDet: Detection = data.detection;
+          setDetections(prev => prev.map(d => d.id === updatedDet.id ? updatedDet : d));
+          setSelectedDetection(prev => (prev && prev.id === updatedDet.id ? updatedDet : prev));
+          if (data.notification) {
+            setNotifications(prev => [data.notification, ...prev.slice(0, 24)]);
+          }
+        } else if (type === 'simulation:updated') {
+          setSimulation(prev => ({
+            ...prev,
+            isRunning: data.isRunning,
+            speed: data.speed,
+          }));
+        }
+      }
+    } catch (error) {
+      console.warn('[UrbanNex Client] Event poll failed:', error);
     }
   }, [demoMode, sessionToken]);
 
   useEffect(() => {
-    connectWebSocket();
-
-    // Fallback initial fetch via REST
     if (!sessionToken || demoMode) return;
+
+    setWsConnected(true);
+    setSystemHealth(prev => ({ ...prev, webSocketStatus: 'connected' }));
+    void pollLiveData();
+
     const headers = { Authorization: `Bearer ${sessionToken}` };
-    fetch('/api/buses', { headers })
+    fetch(apiUrl('/api/buses'), { headers })
       .then(r => r.json())
       .then(d => { if (d.buses) setBuses(d.buses); })
       .catch(() => {});
 
-    fetch('/api/detections', { headers })
+    fetch(apiUrl('/api/detections'), { headers })
       .then(r => r.json())
       .then(d => { if (d.detections) setDetections(d.detections); })
       .catch(() => {});
 
-    return () => {
-      if (wsRef.current) wsRef.current.close();
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-    };
-  }, [connectWebSocket, demoMode, sessionToken]);
+    pollingRef.current = window.setInterval(() => {
+      void pollLiveData();
+    }, 6000);
 
-  // Send WS or REST commands
+    return () => {
+      if (pollingRef.current) window.clearInterval(pollingRef.current);
+    };
+  }, [demoMode, pollLiveData, sessionToken]);
+
   const sendCommand = useCallback((cmd: any) => {
     if (demoMode) return;
     const headers = { 'Content-Type': 'application/json', ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) };
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(cmd));
+
+    if (cmd.action === 'verify' && cmd.detectionId) {
+      fetch(apiUrl(`/api/detections/${cmd.detectionId}/verify`), { method: 'POST', headers }).catch(() => {});
+    } else if (cmd.action === 'assign' && cmd.detectionId) {
+      fetch(apiUrl(`/api/detections/${cmd.detectionId}/assign`), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ department: cmd.department, note: cmd.note }),
+      }).catch(() => {});
+    } else if (cmd.action === 'resolve' && cmd.detectionId) {
+      fetch(apiUrl(`/api/detections/${cmd.detectionId}/resolve`), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ resolutionNotes: cmd.notes }),
+      }).catch(() => {});
     } else {
-      // Fallback to REST API
-      if (cmd.action === 'verify' && cmd.detectionId) {
-        fetch(`/api/detections/${cmd.detectionId}/verify`, { method: 'POST', headers }).catch(() => {});
-      } else if (cmd.action === 'assign' && cmd.detectionId) {
-        fetch(`/api/detections/${cmd.detectionId}/assign`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ department: cmd.department }),
-        }).catch(() => {});
-      } else if (cmd.action === 'resolve' && cmd.detectionId) {
-        fetch(`/api/detections/${cmd.detectionId}/resolve`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ resolutionNotes: cmd.notes }),
-        }).catch(() => {});
-      } else {
-        fetch('/api/simulation/control', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(cmd),
-        }).catch(() => {});
-      }
+      fetch(apiUrl('/api/simulation/control'), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(cmd),
+      }).catch(() => {});
     }
   }, [demoMode, sessionToken]);
 
@@ -239,7 +210,7 @@ export function useUrbanNexRealtime() {
 
   const rejectDetection = useCallback((id: string, reason?: string) => {
     setDetections(prev => prev.map(d => d.id === id ? { ...d, status: 'rejected' as IncidentStatus } : d));
-    fetch(`/api/detections/${id}/reject`, {
+    fetch(apiUrl(`/api/detections/${id}/reject`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) },
       body: JSON.stringify({ reason }),
@@ -253,7 +224,7 @@ export function useUrbanNexRealtime() {
 
   const markInProgress = useCallback((id: string, note?: string) => {
     setDetections(prev => prev.map(d => d.id === id ? { ...d, status: 'in_progress' as IncidentStatus } : d));
-    fetch(`/api/detections/${id}/in-progress`, {
+    fetch(apiUrl(`/api/detections/${id}/in-progress`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) },
       body: JSON.stringify({ note }),
