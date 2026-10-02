@@ -120,20 +120,15 @@ var ResilientStore = class {
     if (cleanSql.startsWith("SELECT 1")) {
       return { 1: 1 };
     }
-    if (cleanSql.startsWith("SELECT id FROM users WHERE email = ?")) {
+    if (cleanSql.includes("FROM users WHERE email = ?")) {
       const email = String(params[0] || "").toLowerCase();
-      const user = this.users.find((u) => u.email === email);
-      return user ? { id: user.id } : void 0;
-    }
-    if (cleanSql.startsWith("SELECT id, name, email, password_hash, password_salt, role, department, approved FROM users WHERE email = ?")) {
-      const email = String(params[0] || "").toLowerCase();
-      const user = this.users.find((u) => u.email === email);
+      const user = this.users.find((u) => u.email.toLowerCase() === email);
       return user ? { ...user } : void 0;
     }
-    if (cleanSql.startsWith("SELECT name, email FROM users WHERE id = ?")) {
+    if (cleanSql.includes("FROM users WHERE id = ?")) {
       const id = Number(params[0]);
-      const user = this.users.find((u) => u.id === id);
-      return user ? { name: user.name, email: user.email } : void 0;
+      const user = this.users.find((u) => Number(u.id) === id);
+      return user ? { ...user } : void 0;
     }
     if (cleanSql.includes("FROM sessions") && cleanSql.includes("users") && cleanSql.includes("sessions.token = ?")) {
       const token = String(params[0]);
