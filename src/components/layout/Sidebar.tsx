@@ -63,17 +63,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: null,
     }] : []),
     {
-      id: 'live_camera' as NavTab,
-      label: 'Live Camera',
-      icon: Camera,
-      badge: 'Mobile',
-      badgeColor: 'bg-blue-100 text-blue-700',
-    },
-    {
       id: 'real_video' as NavTab,
-      label: 'Real AI Video',
+      label: 'AI Video & Image Analyzer',
       icon: ScanSearch,
-      badge: 'YOLO',
+      badge: 'AI Vision',
       badgeColor: 'bg-emerald-100 text-emerald-700',
     },
     {

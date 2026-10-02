@@ -12,7 +12,6 @@ import { IncidentsPage } from './components/incidents/IncidentsPage';
 import { AnalyticsPage } from './components/analytics/AnalyticsPage';
 import { SystemHealthPage } from './components/health/SystemHealthPage';
 import { PrivacySpecsPage } from './components/privacy/PrivacySpecsPage';
-import { LiveCamera } from './components/camera/LiveCamera';
 import { RealVideoDetection } from './components/detections/RealVideoDetection';
 import { DetectionDrawer } from './components/detections/DetectionDrawer';
 import { LoginPage } from './components/auth/LoginPage';
@@ -22,7 +21,7 @@ import {
   LayoutDashboard, 
   MapPin, 
   Activity, 
-  Camera,
+  ScanSearch,
   Bus as BusIcon, 
   Kanban, 
   Menu, 
@@ -527,13 +526,6 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'live_camera' && (
-            <LiveCamera
-              onSubmitDetection={submitMobileDetection}
-              onOpenMap={() => setActiveTab('gis_map')}
-            />
-          )}
-
           {activeTab === 'real_video' && (
             <RealVideoDetection
               accessToken={sessionToken || ''}
@@ -674,13 +666,13 @@ export default function App() {
         </button>}
 
         {user.role === 'main' && <button
-          onClick={() => setActiveTab('live_camera')}
+          onClick={() => setActiveTab('real_video')}
           className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'live_camera' ? 'text-blue-600' : 'text-slate-500'
+            activeTab === 'real_video' ? 'text-blue-600' : 'text-slate-500'
           }`}
         >
-          <Camera className="w-4 h-4" />
-          <span>Camera</span>
+          <ScanSearch className="w-4 h-4" />
+          <span>AI Vision</span>
         </button>}
 
         {user.role === 'main' && <button

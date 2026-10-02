@@ -1851,25 +1851,85 @@ function buildSyntheticVideoAnalysis(fileName) {
     frame_interval: 3
   };
 }
-app.post("/api/detections/video", (req, res, next) => {
-  if (!requireMainBranch(req, res)) return;
-  next();
-}, upload.single("video"), (req, res) => {
+function buildSyntheticImageAnalysis(fileName, dataUri) {
+  const issueType = inferVideoIssueType(fileName);
+  const confidence = Number((0.89 + Math.random() * 0.09).toFixed(3));
+  const x1 = 120 + Math.round(Math.random() * 80);
+  const y1 = 140 + Math.round(Math.random() * 60);
+  const x2 = x1 + 220 + Math.round(Math.random() * 80);
+  const y2 = y1 + 130 + Math.round(Math.random() * 70);
+  const severity = mapSeverity(issueType, confidence);
+  const descriptions = {
+    pothole: "Severe pavement depression and asphalt cavitation detected in transit lane.",
+    road_damage: "Extensive structural asphalt cracking and lateral degradation observed.",
+    waterlogging: "Stormwater accumulation impeding vehicular traction and pedestrian safety.",
+    congestion: "High-density vehicle accumulation creating bottleneck at urban arterial.",
+    pedestrian_risk: "Pedestrian in close proximity to active transit roadway without designated crossing."
+  };
+  const departments = {
+    pothole: "Roads & Infrastructure",
+    road_damage: "Roads & Infrastructure",
+    waterlogging: "Water & Drainage",
+    congestion: "Traffic Management",
+    pedestrian_risk: "Public Safety"
+  };
+  const detection = {
+    class: issueType,
+    type: issueType,
+    severity,
+    confidence,
+    bbox: { x1, y1, x2, y2 },
+    frame: 1,
+    timestamp: 0,
+    description: descriptions[issueType] || "Civic infrastructure anomaly detected.",
+    department: departments[issueType] || "Roads & Infrastructure",
+    frame_image: dataUri || makeDetectionSvg(x1, y1, x2, y2, confidence, 1, issueType)
+  };
+  return {
+    success: true,
+    media_type: "image",
+    file_name: fileName,
+    video_name: fileName,
+    detections: [detection],
+    total_detections: 1,
+    confidence_threshold: 0.4
+  };
+}
+var handleMediaAnalysis = async (req, res) => {
   const file = req.file;
-  if (!file) {
-    return res.status(400).json({ detail: "Select a video before starting analysis." });
+  const bodyImage = req.body?.image;
+  const fileName = (file?.originalname || req.body?.fileName || "analyzed-media").trim();
+  const explicitType = req.body?.mediaType;
+  const imageExtensions = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".svg"];
+  const videoExtensions = [".mp4", ".mov", ".avi", ".mkv", ".webm"];
+  const extension = import_path.default.extname(fileName).toLowerCase();
+  const isImage = explicitType === "image" || Boolean(bodyImage) || imageExtensions.includes(extension) || file?.mimetype?.startsWith("image/");
+  const isVideo = explicitType === "video" || videoExtensions.includes(extension) || file?.mimetype?.startsWith("video/");
+  if (!file && !bodyImage) {
+    return res.status(400).json({ detail: "Upload a video or image file before starting analysis." });
   }
-  const extension = import_path.default.extname(file.originalname || "").toLowerCase();
-  const allowed = [".mp4", ".mov", ".avi", ".mkv"];
-  if (!allowed.includes(extension)) {
-    return res.status(400).json({ detail: "Invalid file type. Upload an MP4, MOV, AVI, or MKV video." });
+  if (file && file.size > 200 * 1024 * 1024) {
+    return res.status(413).json({ detail: "Media file is too large for processing." });
   }
-  if (file.size > 200 * 1024 * 1024) {
-    return res.status(413).json({ detail: "Video file is too large for processing." });
+  if (isImage) {
+    const dataUri = bodyImage || (file ? `data:${file.mimetype || "image/jpeg"};base64,${file.buffer.toString("base64")}` : void 0);
+    const result = buildSyntheticImageAnalysis(fileName, dataUri);
+    return res.status(200).json(result);
   }
-  const result = buildSyntheticVideoAnalysis(file.originalname || "uploaded-video");
-  return res.status(200).json(result);
-});
+  if (isVideo || !extension) {
+    const result = buildSyntheticVideoAnalysis(fileName);
+    return res.status(200).json(result);
+  }
+  return res.status(400).json({ detail: "Unsupported format. Upload an MP4, MOV, WEBM video or JPG, PNG, WEBP image." });
+};
+app.post("/api/detections/analyze", async (req, res, next) => {
+  if (!await requireMainBranch(req, res)) return;
+  next();
+}, upload.single("file"), handleMediaAnalysis);
+app.post("/api/detections/video", async (req, res, next) => {
+  if (!await requireMainBranch(req, res)) return;
+  next();
+}, upload.single("video"), handleMediaAnalysis);
 var healthCheck = async (_req, res) => {
   try {
     await dbGet("SELECT 1");
