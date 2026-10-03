@@ -2179,6 +2179,23 @@ app.post("/api/auth/signup", async (req, res) => {
     return res.status(500).json({ code: "DATABASE_UNAVAILABLE", error: "Unable to create the account because the authentication database failed." });
   }
 });
+function generateStatelessVerificationCode(email, windowOffset = 0) {
+  const secret = getSessionSecret();
+  const windowTime = Math.floor(Date.now() / (15 * 60 * 1e3)) + windowOffset;
+  const hash = (0, import_node_crypto.createHmac)("sha256", secret).update(`pwd-reset:${email.toLowerCase().trim()}:${windowTime}`).digest("hex");
+  const num = parseInt(hash.slice(0, 8), 16) % 9e5 + 1e5;
+  return String(num);
+}
+function verifyStatelessVerificationCode(code, email) {
+  if (!code || !/^\d{6}$/.test(code.trim())) return false;
+  const cleanCode = code.trim();
+  for (const offset of [0, -1, -2, 1]) {
+    if (generateStatelessVerificationCode(email, offset) === cleanCode) {
+      return true;
+    }
+  }
+  return false;
+}
 function createSignedResetToken(userId, email) {
   const secret = getSessionSecret();
   const expiresAt = Date.now() + 30 * 60 * 1e3;
@@ -2215,7 +2232,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   if (!account) {
     return res.status(404).json({ error: "No registered authority account found with this email. Please check your email or sign up." });
   }
-  const verificationCode = String(Math.floor(1e5 + Math.random() * 9e5));
+  const verificationCode = generateStatelessVerificationCode(account.email);
   const codeHash = (0, import_node_crypto.createHash)("sha256").update(verificationCode).digest("hex");
   const signedToken = createSignedResetToken(account.id, account.email);
   const signedHash = (0, import_node_crypto.createHash)("sha256").update(signedToken).digest("hex");
@@ -2272,8 +2289,9 @@ app.post("/api/auth/reset-password", async (req, res) => {
     SELECT token_hash FROM password_resets
     WHERE token_hash = ? AND user_id = ? AND expires_at > ?
   `, [tokenHash, user.id, (/* @__PURE__ */ new Date()).toISOString()]);
+  const isStatelessCodeValid = verifyStatelessVerificationCode(token, email);
   const isSignedValid = verifySignedResetToken(token, email, user.id);
-  if (!reset && !isSignedValid) {
+  if (!reset && !isStatelessCodeValid && !isSignedValid) {
     return res.status(400).json({ error: "The verification code is invalid or has expired. Please request a new code." });
   }
   const credentials = hashPassword(password);

@@ -999,6 +999,27 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
+function generateStatelessVerificationCode(email: string, windowOffset = 0): string {
+  const secret = getSessionSecret();
+  const windowTime = Math.floor(Date.now() / (15 * 60 * 1000)) + windowOffset;
+  const hash = createHmac('sha256', secret)
+    .update(`pwd-reset:${email.toLowerCase().trim()}:${windowTime}`)
+    .digest('hex');
+  const num = (parseInt(hash.slice(0, 8), 16) % 900000) + 100000;
+  return String(num);
+}
+
+function verifyStatelessVerificationCode(code: string, email: string): boolean {
+  if (!code || !/^\d{6}$/.test(code.trim())) return false;
+  const cleanCode = code.trim();
+  for (const offset of [0, -1, -2, 1]) {
+    if (generateStatelessVerificationCode(email, offset) === cleanCode) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function createSignedResetToken(userId: number | string, email: string): string {
   const secret = getSessionSecret();
   const expiresAt = Date.now() + 30 * 60 * 1000;
@@ -1039,8 +1060,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     return res.status(404).json({ error: 'No registered authority account found with this email. Please check your email or sign up.' });
   }
 
-  // Generate a clean, user-friendly 6-digit verification code
-  const verificationCode = String(Math.floor(100000 + Math.random() * 900000));
+  // Generate a clean, user-friendly 6-digit verification code with HMAC stateless resilience
+  const verificationCode = generateStatelessVerificationCode(account.email);
   const codeHash = createHash('sha256').update(verificationCode).digest('hex');
   const signedToken = createSignedResetToken(account.id, account.email);
   const signedHash = createHash('sha256').update(signedToken).digest('hex');
@@ -1101,8 +1122,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
     SELECT token_hash FROM password_resets
     WHERE token_hash = ? AND user_id = ? AND expires_at > ?
   `, [tokenHash, user.id, new Date().toISOString()]);
+  const isStatelessCodeValid = verifyStatelessVerificationCode(token, email);
   const isSignedValid = verifySignedResetToken(token, email, user.id);
-  if (!reset && !isSignedValid) {
+  if (!reset && !isStatelessCodeValid && !isSignedValid) {
     return res.status(400).json({ error: 'The verification code is invalid or has expired. Please request a new code.' });
   }
 
