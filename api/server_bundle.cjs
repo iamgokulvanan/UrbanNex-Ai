@@ -120,8 +120,14 @@ var ResilientStore = class {
     if (cleanSql.startsWith("SELECT 1")) {
       return { 1: 1 };
     }
-    if (cleanSql.includes("FROM users WHERE email = ?")) {
-      const email = String(params[0] || "").toLowerCase();
+    if (cleanSql.includes("FROM users WHERE id = ? OR email = ?")) {
+      const id = Number(params[0]);
+      const email = String(params[1] || "").toLowerCase();
+      const user = this.users.find((u) => id && Number(u.id) === id || email && u.email.toLowerCase() === email);
+      return user ? { ...user } : void 0;
+    }
+    if (cleanSql.includes("FROM users") && (cleanSql.includes("email = ?") || cleanSql.includes("LOWER(email) = ?"))) {
+      const email = String(params[params.length - 1] || params[0] || "").toLowerCase();
       const user = this.users.find((u) => u.email.toLowerCase() === email);
       return user ? { ...user } : void 0;
     }
@@ -142,15 +148,24 @@ var ResilientStore = class {
       const item = this.app_settings.get(key);
       return item ? { value: item.value } : void 0;
     }
-    if (cleanSql.includes("FROM password_resets") && cleanSql.includes("user_id = ?")) {
+    if (cleanSql.includes("FROM password_resets") && cleanSql.includes("user_id = ?") && !cleanSql.includes("token_hash = ?")) {
       const userId = Number(params[0]);
-      const item = this.password_resets.find((r) => r.user_id === userId);
+      const item = this.password_resets.find((r) => Number(r.user_id) === userId);
       return item ? { ...item } : void 0;
     }
     if (cleanSql.includes("FROM password_resets") && cleanSql.includes("token_hash = ?")) {
       const tokenHash = String(params[0]);
-      const item = this.password_resets.find((r) => r.token_hash === tokenHash);
-      return item ? { token_hash: item.token_hash } : void 0;
+      const item = this.password_resets.find((r) => {
+        if (r.token_hash !== tokenHash) return false;
+        if (cleanSql.includes("user_id = ?") && params.length >= 2) {
+          if (String(r.user_id) !== String(params[1])) return false;
+        }
+        if (cleanSql.includes("expires_at > ?") && params.length >= 3) {
+          if (new Date(r.expires_at).getTime() <= new Date(params[2]).getTime()) return false;
+        }
+        return true;
+      });
+      return item ? { token_hash: item.token_hash, user_id: item.user_id, expires_at: item.expires_at } : void 0;
     }
     return void 0;
   }
@@ -2192,10 +2207,10 @@ function verifySignedResetToken(token, expectedEmail, expectedUserId) {
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
   if (!email || email.length > 254) return res.status(400).json({ error: "Enter a valid account email." });
-  let account = await dbGet("SELECT id, name, email FROM users WHERE LOWER(email) = ?", [email]);
+  let account = await dbGet("SELECT id, name, email FROM users WHERE email = ?", [email]);
   if (!account && email === "iamgokulvanan@gmail.com") {
     await bootstrapMainBranch();
-    account = await dbGet("SELECT id, name, email FROM users WHERE LOWER(email) = ?", [email]);
+    account = await dbGet("SELECT id, name, email FROM users WHERE email = ?", [email]);
   }
   if (!account) {
     return res.status(404).json({ error: "No registered authority account found with this email. Please check your email or sign up." });
@@ -2250,7 +2265,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   if (!email || !token || password.length < 4) {
     return res.status(400).json({ error: "Email, verification code, and a new password of at least 4 characters are required." });
   }
-  const user = await dbGet("SELECT id, name, email, role, department, approved FROM users WHERE LOWER(email) = ?", [email]);
+  const user = await dbGet("SELECT id, name, email, role, department, approved FROM users WHERE email = ?", [email]);
   if (!user) return res.status(404).json({ error: "User account not found." });
   const tokenHash = (0, import_node_crypto.createHash)("sha256").update(token).digest("hex");
   const reset = await dbGet(`

@@ -1030,10 +1030,10 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   if (!email || email.length > 254) return res.status(400).json({ error: 'Enter a valid account email.' });
   
-  let account = await dbGet<UserRecord>('SELECT id, name, email FROM users WHERE LOWER(email) = ?', [email]);
+  let account = await dbGet<UserRecord>('SELECT id, name, email FROM users WHERE email = ?', [email]);
   if (!account && email === 'iamgokulvanan@gmail.com') {
     await bootstrapMainBranch();
-    account = await dbGet<UserRecord>('SELECT id, name, email FROM users WHERE LOWER(email) = ?', [email]);
+    account = await dbGet<UserRecord>('SELECT id, name, email FROM users WHERE email = ?', [email]);
   }
   if (!account) {
     return res.status(404).json({ error: 'No registered authority account found with this email. Please check your email or sign up.' });
@@ -1093,7 +1093,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
   if (!email || !token || password.length < 4) {
     return res.status(400).json({ error: 'Email, verification code, and a new password of at least 4 characters are required.' });
   }
-  const user = await dbGet<UserRecord>('SELECT id, name, email, role, department, approved FROM users WHERE LOWER(email) = ?', [email]);
+  const user = await dbGet<UserRecord>('SELECT id, name, email, role, department, approved FROM users WHERE email = ?', [email]);
   if (!user) return res.status(404).json({ error: 'User account not found.' });
   
   const tokenHash = createHash('sha256').update(token).digest('hex');
