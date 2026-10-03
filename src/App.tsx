@@ -17,7 +17,7 @@ import { DetectionDrawer } from './components/detections/DetectionDrawer';
 import { LoginPage } from './components/auth/LoginPage';
 import { AuthorityManagementPage } from './components/authorities/AuthorityManagementPage';
 import { Detection, Bus, Department, DetectionType } from './types';
-import { DEPARTMENTS } from './data/seedData';
+import { DEPARTMENTS, isDetectionSuitableForDepartment } from './data/seedData';
 import { 
   LayoutDashboard, 
   MapPin, 
@@ -162,9 +162,9 @@ export default function App() {
     setActiveTab('gis_map');
   };
 
-  // Scope detections: authority users only access their department's problems and solve workflows
+  // Scope detections: authority users only access their department's suitable problems and solve workflows
   const visibleDetections = user?.role === 'department' && user.department
-    ? detections.filter(d => d.department === user.department)
+    ? detections.filter(d => isDetectionSuitableForDepartment(d, user.department!))
     : detections;
 
   const pendingCount = visibleDetections.filter(d => d.status === 'pending_verification' || (user?.role === 'department' && d.status === 'assigned')).length;
@@ -228,7 +228,26 @@ export default function App() {
       }
       const data = await readApiResponse(response);
       if (response.status === 202 && data.pendingApproval) {
-        setAuthorityNotice(data.message);
+        const newReq = data.request || {
+          id: Date.now(),
+          name: name.trim(),
+          email: normalizedEmail,
+          requestedDepartment: department || null,
+          createdAt: new Date().toISOString(),
+        };
+        try {
+          const raw = localStorage.getItem('urbannex_authority_pending_queue');
+          const existing: any[] = raw ? JSON.parse(raw) : [];
+          const filtered = existing.filter((r: any) => r.email.toLowerCase() !== newReq.email.toLowerCase());
+          filtered.push(newReq);
+          localStorage.setItem('urbannex_authority_pending_queue', JSON.stringify(filtered));
+        } catch {}
+
+        setAuthorityRequests(prev => {
+          const filtered = prev.filter(r => r.email.toLowerCase() !== newReq.email.toLowerCase());
+          return [...filtered, newReq];
+        });
+        setAuthorityNotice(data.message || 'Your account request was sent to the main branch for approval.');
         setAuthMode('login');
         return;
       }
@@ -264,34 +283,121 @@ export default function App() {
 
   const loadAuthorityData = async (token: string) => {
     try {
+      let localQueued: any[] = [];
+      try {
+        const raw = localStorage.getItem('urbannex_authority_pending_queue');
+        if (raw) localQueued = JSON.parse(raw);
+      } catch {}
+
+      if (localQueued.length > 0 && token) {
+        fetch(apiUrl('/api/admin/sync-authority-requests'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ requests: localQueued }),
+        }).catch(() => {});
+      }
+
       const response = await fetch(apiUrl('/api/admin/authorities'), { headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) throw new Error('Could not load department access requests and authority roster.');
       const data = await response.json();
-      setAuthorityRequests(data.requests || []);
-      setAuthorityRoster(data.roster || []);
+      
+      const serverRequests: any[] = data.requests || [];
+      const serverRoster: any[] = data.roster || [];
+
+      // Merge server requests with local queued requests (avoid duplicates)
+      const mergedRequests = [...serverRequests];
+      for (const loc of localQueued) {
+        const inServer = serverRequests.some(s => s.email.toLowerCase() === loc.email.toLowerCase() || s.id === loc.id);
+        const inRoster = serverRoster.some(r => r.email.toLowerCase() === loc.email.toLowerCase());
+        if (!inServer && !inRoster) {
+          mergedRequests.push(loc);
+        }
+      }
+
+      // Merge local approved roster cache
+      let localRoster: any[] = [];
+      try {
+        const raw = localStorage.getItem('urbannex_authority_approved_roster');
+        if (raw) localRoster = JSON.parse(raw);
+      } catch {}
+      const mergedRoster = [...serverRoster];
+      for (const loc of localRoster) {
+        if (!mergedRoster.some(r => r.email.toLowerCase() === loc.email.toLowerCase())) {
+          mergedRoster.push(loc);
+        }
+      }
+
+      setAuthorityRequests(mergedRequests);
+      setAuthorityRoster(mergedRoster);
       setAuthorityActivity(data.activity || []);
       setAuthorityError('');
     } catch (error) {
+      try {
+        const raw = localStorage.getItem('urbannex_authority_pending_queue');
+        if (raw) setAuthorityRequests(JSON.parse(raw));
+      } catch {}
       setAuthorityError(error instanceof Error ? error.message : 'Could not load department access requests.');
     }
   };
 
   const approveAuthorityRequest = async (id: number, department: Department) => {
     if (!sessionToken) return;
+    const reqObj = authorityRequests.find(r => r.id === id);
     try {
       const response = await fetch(apiUrl(`/api/admin/authority-requests/${id}/approve`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
-        body: JSON.stringify({ department }),
+        body: JSON.stringify({ department, email: reqObj?.email }),
       });
       const data = await response.json();
       if (!response.ok) {
         setAuthorityError(data.error || 'Could not approve the authority request.');
         return;
       }
+
+      // Update local storage queues immediately
+      try {
+        const rawPending = localStorage.getItem('urbannex_authority_pending_queue');
+        if (rawPending) {
+          const list = JSON.parse(rawPending);
+          const updated = list.filter((r: any) => r.id !== id && (!reqObj || r.email.toLowerCase() !== reqObj.email.toLowerCase()));
+          localStorage.setItem('urbannex_authority_pending_queue', JSON.stringify(updated));
+        }
+
+        const rawRoster = localStorage.getItem('urbannex_authority_approved_roster');
+        const rosterList = rawRoster ? JSON.parse(rawRoster) : [];
+        if (reqObj) {
+          rosterList.push({
+            id,
+            name: reqObj.name,
+            email: reqObj.email,
+            role: 'department',
+            department,
+            createdAt: reqObj.createdAt,
+          });
+          localStorage.setItem('urbannex_authority_approved_roster', JSON.stringify(rosterList));
+        }
+      } catch {}
+
+      // Update state immediately
+      setAuthorityRequests(prev => prev.filter(r => r.id !== id && (!reqObj || r.email.toLowerCase() !== reqObj.email.toLowerCase())));
+      if (reqObj) {
+        setAuthorityRoster(prev => [
+          ...prev.filter(r => (!reqObj || r.email.toLowerCase() !== reqObj.email.toLowerCase())),
+          {
+            id,
+            name: reqObj.name,
+            email: reqObj.email,
+            role: 'department',
+            department,
+            createdAt: reqObj.createdAt,
+          }
+        ]);
+      }
+
       setAuthorityError('');
       setAuthorityNotice(data.emailSent
-        ? `Access approved for ${department}; an email was sent to the authority.`
+        ? `Access approved for ${department}; an email was sent to ${reqObj?.name || 'the authority'}.`
         : `Access approved for ${department}. Account is now active in the directory.`);
       void loadAuthorityData(sessionToken);
     } catch (e) {
@@ -550,6 +656,7 @@ export default function App() {
             activeBusCount={buses.filter(b => b.status === 'active').length}
             pendingCount={pendingCount}
             criticalCount={criticalCount}
+            pendingAuthorityCount={authorityRequests.length}
           />
         </div>
 
@@ -564,7 +671,7 @@ export default function App() {
               <div className="p-3 border-b border-slate-200 flex items-center justify-between">
                 <span className="font-bold text-sm text-slate-800">Navigation Menu</span>
                 <button 
-                  onClick={() => setMobileMenuOpen(false)}
+                  onClick={() => setMobileMenuOpen(false)} 
                   className="p-1 text-slate-400 hover:text-slate-700"
                 >
                   <X className="w-5 h-5" />
@@ -582,6 +689,7 @@ export default function App() {
                   activeBusCount={buses.filter(b => b.status === 'active').length}
                   pendingCount={pendingCount}
                   criticalCount={criticalCount}
+                  pendingAuthorityCount={authorityRequests.length}
                 />
               </div>
             </div>

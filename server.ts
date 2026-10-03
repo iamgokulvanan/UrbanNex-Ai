@@ -10,7 +10,8 @@ import {
   INITIAL_BUSES, 
   INITIAL_DETECTIONS, 
   INITIAL_ROUTES, 
-  DEPARTMENTS 
+  DEPARTMENTS,
+  isDetectionSuitableForDepartment,
 } from './src/data/seedData.ts';
 import { 
   Bus, 
@@ -362,7 +363,9 @@ async function requireMainBranch(req: express.Request, res: express.Response): P
 }
 
 function canAccessDetection(user: AuthUser, detection: Detection) {
-  return user.role === 'main' || detection.department === user.department;
+  if (user.role === 'main') return true;
+  if (!user.department) return false;
+  return isDetectionSuitableForDepartment(detection, user.department);
 }
 
 // In-memory persistent state for prototype demonstration
@@ -599,6 +602,13 @@ async function triggerSimulatedDetection(selectedBusId?: string, forcedType?: st
 
   const detectionId = `DET-2026-00${++detectionCounter}`;
   const detectionType = (forcedType as any) || result.type || 'pothole';
+  const defaultDepartment: Department = detectionType === 'waterlogging'
+    ? 'Water & Drainage'
+    : (detectionType === 'congestion'
+      ? 'Traffic Management'
+      : (detectionType === 'pedestrian_risk'
+        ? 'Public Safety'
+        : 'Roads & Infrastructure'));
 
   // Nearby location naming based on coordinates
   const locationNames = [
@@ -625,6 +635,7 @@ async function triggerSimulatedDetection(selectedBusId?: string, forcedType?: st
     routeId: targetBus.routeId,
     timestamp: new Date().toISOString(),
     status: 'pending_verification',
+    department: defaultDepartment,
     evidenceImage: result.evidenceKey || 'simulated_pothole_01',
     simulatedBoundingBoxes: result.boundingBoxes,
     roadSurfaceMetric: result.roadSurfaceMetric,
@@ -950,12 +961,32 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 
   const credentials = hashPassword(password);
+  const nowIso = new Date().toISOString();
   try {
-    await dbRun(`
+    const runResult = await dbRun(`
       INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
       VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
-    `, [name, email, credentials.hash, credentials.salt, requestedDepartment, new Date().toISOString()]);
-    return res.status(202).json({ pendingApproval: true, message: 'Your account request was sent to the main branch for approval.' });
+    `, [name, email, credentials.hash, credentials.salt, requestedDepartment, nowIso]);
+
+    const createdRecord = await dbGet<UserRecord>('SELECT id, name, email, requested_department, created_at FROM users WHERE email = ?', [email]);
+    const requestId = createdRecord ? Number(createdRecord.id) : (runResult.lastInsertRowid ? Number(runResult.lastInsertRowid) : Date.now());
+    const createdAt = createdRecord?.created_at || nowIso;
+
+    const requestObj = {
+      id: requestId,
+      name,
+      email,
+      requestedDepartment,
+      createdAt,
+      passwordHash: credentials.hash,
+      passwordSalt: credentials.salt,
+    };
+
+    return res.status(202).json({
+      pendingApproval: true,
+      message: 'Your account request was sent to the main branch for approval.',
+      request: requestObj,
+    });
   } catch (error: any) {
     if (
       (error instanceof Error && (error.message.includes('UNIQUE') || error.message.includes('duplicate key'))) ||
@@ -1191,6 +1222,28 @@ app.get('/api/admin/authority-requests', async (req, res) => {
   res.json({ requests });
 });
 
+app.post('/api/admin/sync-authority-requests', async (req, res) => {
+  const admin = await requireMainBranch(req, res);
+  if (!admin) return;
+  const requests = Array.isArray(req.body?.requests) ? req.body.requests : [];
+  for (const r of requests) {
+    if (!r?.email || !r?.name) continue;
+    const email = String(r.email).trim().toLowerCase();
+    const existing = await dbGet<{ id: number | string }>('SELECT id FROM users WHERE email = ?', [email]);
+    if (!existing) {
+      const creds = r.passwordHash && r.passwordSalt
+        ? { hash: r.passwordHash, salt: r.passwordSalt }
+        : hashPassword(randomBytes(12).toString('hex'));
+      const reqDept = r.requestedDepartment && DEPARTMENTS.includes(r.requestedDepartment) ? r.requestedDepartment : null;
+      await dbRun(`
+        INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+        VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
+      `, [String(r.name).trim(), email, creds.hash, creds.salt, reqDept, r.createdAt || new Date().toISOString()]);
+    }
+  }
+  res.json({ success: true });
+});
+
 app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
   const approver = await requireMainBranch(req, res);
   if (!approver) return;
@@ -1199,12 +1252,21 @@ app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
     return res.status(400).json({ error: 'Choose a valid department.' });
   }
   const targetId = Number(req.params.id);
-  const result = await dbRun(`
+  const targetEmail = req.body.email ? String(req.body.email).trim().toLowerCase() : null;
+  let result = await dbRun(`
     UPDATE users SET department = ?, approved = 1
     WHERE id = ? AND role = 'department'
   `, [department, targetId]);
+
+  if (!result.changes && targetEmail) {
+    result = await dbRun(`
+      UPDATE users SET department = ?, approved = 1
+      WHERE email = ? AND role = 'department'
+    `, [department, targetEmail]);
+  }
+
   if (!result.changes) return res.status(404).json({ error: 'Authority request not found.' });
-  const account = await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE id = ?', [targetId]);
+  const account = await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE id = ? OR email = ?', [targetId, targetEmail || '']);
   if (!account) return res.status(404).json({ error: 'Authority request not found.' });
   let emailSent = false;
   try {

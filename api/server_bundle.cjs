@@ -946,6 +946,7 @@ var INITIAL_DETECTIONS = [
     routeId: "R-07",
     timestamp: new Date(Date.now() - 2 * 60 * 1e3).toISOString(),
     status: "pending_verification",
+    department: "Roads & Infrastructure",
     evidenceImage: "simulated_pothole_01",
     simulatedBoundingBoxes: [
       { x: 38, y: 55, width: 24, height: 18, label: "Pothole (Depth: 7.5cm)", confidence: 0.942 }
@@ -977,6 +978,7 @@ var INITIAL_DETECTIONS = [
     routeId: "R-24",
     timestamp: new Date(Date.now() - 5 * 60 * 1e3).toISOString(),
     status: "pending_verification",
+    department: "Water & Drainage",
     evidenceImage: "simulated_waterlogging_01",
     simulatedBoundingBoxes: [
       { x: 22, y: 48, width: 55, height: 35, label: "Standing Water (Est. 12cm)", confidence: 0.914 }
@@ -1126,8 +1128,59 @@ var INITIAL_DETECTIONS = [
         note: "Repaired and verified clear for ambulance transit"
       }
     ]
+  },
+  {
+    id: "DET-2026-00129",
+    type: "road_damage",
+    confidence: 0.978,
+    severity: "critical",
+    latitude: 11.0268,
+    longitude: 76.992,
+    locationName: "Hope College Overpass Structural Joint",
+    busId: "BUS-001",
+    routeId: "R-12",
+    timestamp: new Date(Date.now() - 1 * 60 * 1e3).toISOString(),
+    status: "assigned",
+    department: "Emergency Response",
+    assignedTo: "Rapid Disaster & Collapse Relief Unit",
+    evidenceImage: "simulated_damage_01",
+    simulatedBoundingBoxes: [
+      { x: 30, y: 50, width: 40, height: 25, label: "Bridge Joint Gap (>14cm)", confidence: 0.978 }
+    ],
+    roadSurfaceMetric: "Critical fissure exceeding 14cm width across 2 lanes",
+    speedAtDetection: 18,
+    notes: "Severe structural joint breach on overpass. Immediate emergency structural response required.",
+    history: [
+      {
+        id: "H-00",
+        detectionId: "DET-2026-00129",
+        previousStatus: "verified",
+        newStatus: "assigned",
+        timestamp: new Date(Date.now() - 1 * 60 * 1e3).toISOString(),
+        changedBy: "Edge AI (BUS-001)",
+        note: "Flagged as high-priority critical hazard for Emergency Response"
+      }
+    ]
   }
 ];
+var DEPARTMENT_FOR_DETECTION_TYPE = {
+  pothole: "Roads & Infrastructure",
+  road_damage: "Roads & Infrastructure",
+  waterlogging: "Water & Drainage",
+  congestion: "Traffic Management",
+  pedestrian_risk: "Public Safety"
+};
+function isDetectionSuitableForDepartment(detection, department) {
+  if (!department) return true;
+  if (detection.department === department) return true;
+  if (department === "Emergency Response") {
+    return detection.severity === "critical";
+  }
+  if (detection.department && detection.department !== department) {
+    return false;
+  }
+  return DEPARTMENT_FOR_DETECTION_TYPE[detection.type] === department;
+}
 
 // src/services/aiInference.ts
 var DemoInferenceService = class {
@@ -1576,7 +1629,9 @@ async function requireMainBranch(req, res) {
   return user;
 }
 function canAccessDetection(user, detection) {
-  return user.role === "main" || detection.department === user.department;
+  if (user.role === "main") return true;
+  if (!user.department) return false;
+  return isDetectionSuitableForDepartment(detection, user.department);
 }
 var buses = JSON.parse(JSON.stringify(INITIAL_BUSES));
 async function loadPersistedDetections() {
@@ -1782,6 +1837,7 @@ async function triggerSimulatedDetection(selectedBusId, forcedType) {
   });
   const detectionId = `DET-2026-00${++detectionCounter}`;
   const detectionType = forcedType || result.type || "pothole";
+  const defaultDepartment = detectionType === "waterlogging" ? "Water & Drainage" : detectionType === "congestion" ? "Traffic Management" : detectionType === "pedestrian_risk" ? "Public Safety" : "Roads & Infrastructure";
   const locationNames = [
     "Gandhipuram North Cross Rd, Near Signal 4",
     "Avinashi Rd, KMCH Junction",
@@ -1805,6 +1861,7 @@ async function triggerSimulatedDetection(selectedBusId, forcedType) {
     routeId: targetBus.routeId,
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     status: "pending_verification",
+    department: defaultDepartment,
     evidenceImage: result.evidenceKey || "simulated_pothole_01",
     simulatedBoundingBoxes: result.boundingBoxes,
     roadSurfaceMetric: result.roadSurfaceMetric,
@@ -2076,12 +2133,29 @@ app.post("/api/auth/signup", async (req, res) => {
     return res.status(400).json({ error: "Name, email, and a password of at least 4 characters are required." });
   }
   const credentials = hashPassword(password);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   try {
-    await dbRun(`
+    const runResult = await dbRun(`
       INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
       VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
-    `, [name, email, credentials.hash, credentials.salt, requestedDepartment, (/* @__PURE__ */ new Date()).toISOString()]);
-    return res.status(202).json({ pendingApproval: true, message: "Your account request was sent to the main branch for approval." });
+    `, [name, email, credentials.hash, credentials.salt, requestedDepartment, nowIso]);
+    const createdRecord = await dbGet("SELECT id, name, email, requested_department, created_at FROM users WHERE email = ?", [email]);
+    const requestId = createdRecord ? Number(createdRecord.id) : runResult.lastInsertRowid ? Number(runResult.lastInsertRowid) : Date.now();
+    const createdAt = createdRecord?.created_at || nowIso;
+    const requestObj = {
+      id: requestId,
+      name,
+      email,
+      requestedDepartment,
+      createdAt,
+      passwordHash: credentials.hash,
+      passwordSalt: credentials.salt
+    };
+    return res.status(202).json({
+      pendingApproval: true,
+      message: "Your account request was sent to the main branch for approval.",
+      request: requestObj
+    });
   } catch (error) {
     if (error instanceof Error && (error.message.includes("UNIQUE") || error.message.includes("duplicate key")) || error?.code === "23505") {
       return res.status(409).json({ code: "ACCOUNT_EXISTS", error: "An account with this email already exists." });
@@ -2300,6 +2374,25 @@ app.get("/api/admin/authority-requests", async (req, res) => {
   }));
   res.json({ requests });
 });
+app.post("/api/admin/sync-authority-requests", async (req, res) => {
+  const admin = await requireMainBranch(req, res);
+  if (!admin) return;
+  const requests = Array.isArray(req.body?.requests) ? req.body.requests : [];
+  for (const r of requests) {
+    if (!r?.email || !r?.name) continue;
+    const email = String(r.email).trim().toLowerCase();
+    const existing = await dbGet("SELECT id FROM users WHERE email = ?", [email]);
+    if (!existing) {
+      const creds = r.passwordHash && r.passwordSalt ? { hash: r.passwordHash, salt: r.passwordSalt } : hashPassword((0, import_node_crypto.randomBytes)(12).toString("hex"));
+      const reqDept = r.requestedDepartment && DEPARTMENTS.includes(r.requestedDepartment) ? r.requestedDepartment : null;
+      await dbRun(`
+        INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+        VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
+      `, [String(r.name).trim(), email, creds.hash, creds.salt, reqDept, r.createdAt || (/* @__PURE__ */ new Date()).toISOString()]);
+    }
+  }
+  res.json({ success: true });
+});
 app.post("/api/admin/authority-requests/:id/approve", async (req, res) => {
   const approver = await requireMainBranch(req, res);
   if (!approver) return;
@@ -2308,12 +2401,19 @@ app.post("/api/admin/authority-requests/:id/approve", async (req, res) => {
     return res.status(400).json({ error: "Choose a valid department." });
   }
   const targetId = Number(req.params.id);
-  const result = await dbRun(`
+  const targetEmail = req.body.email ? String(req.body.email).trim().toLowerCase() : null;
+  let result = await dbRun(`
     UPDATE users SET department = ?, approved = 1
     WHERE id = ? AND role = 'department'
   `, [department, targetId]);
+  if (!result.changes && targetEmail) {
+    result = await dbRun(`
+      UPDATE users SET department = ?, approved = 1
+      WHERE email = ? AND role = 'department'
+    `, [department, targetEmail]);
+  }
   if (!result.changes) return res.status(404).json({ error: "Authority request not found." });
-  const account = await dbGet("SELECT name, email FROM users WHERE id = ?", [targetId]);
+  const account = await dbGet("SELECT name, email FROM users WHERE id = ? OR email = ?", [targetId, targetEmail || ""]);
   if (!account) return res.status(404).json({ error: "Authority request not found." });
   let emailSent = false;
   try {

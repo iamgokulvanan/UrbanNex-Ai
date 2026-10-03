@@ -42,6 +42,7 @@ interface SidebarProps {
   criticalCount: number;
   userRole: 'main' | 'department';
   userDepartment?: Department | null;
+  pendingAuthorityCount?: number;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -52,6 +53,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   criticalCount,
   userRole,
   userDepartment,
+  pendingAuthorityCount,
 }) => {
   const isDept = userRole === 'department';
 
@@ -101,8 +103,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'authorities' as NavTab,
       label: 'Authority Access',
       icon: UserRoundCog,
-      badge: 'Admin',
-      badgeColor: 'bg-indigo-100 text-indigo-700',
+      badge: (pendingAuthorityCount || 0) > 0 ? `${pendingAuthorityCount} New` : 'Admin',
+      badgeColor: (pendingAuthorityCount || 0) > 0 ? 'bg-amber-100 text-amber-800 font-bold border border-amber-300' : 'bg-indigo-100 text-indigo-700',
     },
     {
       id: 'real_video' as NavTab,

@@ -361,6 +361,7 @@ export const INITIAL_DETECTIONS: Detection[] = [
     routeId: 'R-07',
     timestamp: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
     status: 'pending_verification',
+    department: 'Roads & Infrastructure',
     evidenceImage: 'simulated_pothole_01',
     simulatedBoundingBoxes: [
       { x: 38, y: 55, width: 24, height: 18, label: 'Pothole (Depth: 7.5cm)', confidence: 0.942 }
@@ -392,6 +393,7 @@ export const INITIAL_DETECTIONS: Detection[] = [
     routeId: 'R-24',
     timestamp: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
     status: 'pending_verification',
+    department: 'Water & Drainage',
     evidenceImage: 'simulated_waterlogging_01',
     simulatedBoundingBoxes: [
       { x: 22, y: 48, width: 55, height: 35, label: 'Standing Water (Est. 12cm)', confidence: 0.914 }
@@ -542,4 +544,65 @@ export const INITIAL_DETECTIONS: Detection[] = [
       }
     ],
   },
+  {
+    id: 'DET-2026-00129',
+    type: 'road_damage',
+    confidence: 0.978,
+    severity: 'critical',
+    latitude: 11.0268,
+    longitude: 76.9920,
+    locationName: 'Hope College Overpass Structural Joint',
+    busId: 'BUS-001',
+    routeId: 'R-12',
+    timestamp: new Date(Date.now() - 1 * 60 * 1000).toISOString(),
+    status: 'assigned',
+    department: 'Emergency Response',
+    assignedTo: 'Rapid Disaster & Collapse Relief Unit',
+    evidenceImage: 'simulated_damage_01',
+    simulatedBoundingBoxes: [
+      { x: 30, y: 50, width: 40, height: 25, label: 'Bridge Joint Gap (>14cm)', confidence: 0.978 }
+    ],
+    roadSurfaceMetric: 'Critical fissure exceeding 14cm width across 2 lanes',
+    speedAtDetection: 18,
+    notes: 'Severe structural joint breach on overpass. Immediate emergency structural response required.',
+    history: [
+      {
+        id: 'H-00',
+        detectionId: 'DET-2026-00129',
+        previousStatus: 'verified',
+        newStatus: 'assigned',
+        timestamp: new Date(Date.now() - 1 * 60 * 1000).toISOString(),
+        changedBy: 'Edge AI (BUS-001)',
+        note: 'Flagged as high-priority critical hazard for Emergency Response',
+      }
+    ]
+  },
 ];
+
+export const DEPARTMENT_FOR_DETECTION_TYPE: Record<DetectionType, Department> = {
+  pothole: 'Roads & Infrastructure',
+  road_damage: 'Roads & Infrastructure',
+  waterlogging: 'Water & Drainage',
+  congestion: 'Traffic Management',
+  pedestrian_risk: 'Public Safety',
+};
+
+export function isDetectionSuitableForDepartment(detection: Detection, department: Department): boolean {
+  if (!department) return true;
+  // If explicitly assigned to this department, always show it!
+  if (detection.department === department) return true;
+  
+  // Emergency Response handles all critical incidents across the city + anything assigned to it
+  if (department === 'Emergency Response') {
+    return detection.severity === 'critical';
+  }
+
+  // If explicitly assigned to another department, do not show it
+  if (detection.department && detection.department !== department) {
+    return false;
+  }
+
+  // Check natural problem type mapping
+  return DEPARTMENT_FOR_DETECTION_TYPE[detection.type] === department;
+}
+
