@@ -2146,7 +2146,7 @@ UrbanNex Command Center: ${getApplicationUrl()}`
 app.post("/api/auth/reset-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
   const token = String(req.body.token || "").trim();
-  const password = String(req.body.password || "");
+  const password = String(req.body.newPassword || req.body.password || "");
   if (!email || !token || password.length < 4) {
     return res.status(400).json({ error: "Email, reset token, and a password of at least 4 characters are required." });
   }

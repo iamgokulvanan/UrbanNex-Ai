@@ -175,11 +175,27 @@ export default function App() {
       .map(detection => ({ id: detection.id, label: detection.id, detail: `${detection.type.replace('_', ' ')} · ${detection.locationName}`, kind: 'detection' as const })),
   ].slice(0, 8) : [];
 
-  const handleAuthSubmit = async ({ name, email, password, accountType, department }: { name: string; email: string; password: string; accountType?: 'main' | 'department'; department?: Department }) => {
+  const handleAuthSubmit = async ({ 
+    name, 
+    email, 
+    password, 
+    accountType, 
+    department, 
+    action 
+  }: { 
+    name: string; 
+    email: string; 
+    password: string; 
+    accountType?: 'main' | 'department'; 
+    department?: Department;
+    action?: 'login' | 'signup';
+  }) => {
     setAuthSubmitting(true);
     setAuthError('');
+    setAuthorityNotice('');
     const normalizedEmail = email.trim().toLowerCase();
-    const endpoint = `/api/auth/${authMode === 'signup' ? 'signup' : 'login'}`;
+    const targetAction = action || (authMode === 'signup' ? 'signup' : 'login');
+    const endpoint = `/api/auth/${targetAction}`;
     try {
       let response: Response;
       try {
@@ -206,7 +222,7 @@ export default function App() {
       }
       const data = await readApiResponse(response);
       if (response.status === 202 && data.pendingApproval) {
-        setAuthError(data.message);
+        setAuthorityNotice(data.message);
         setAuthMode('login');
         return;
       }
@@ -288,11 +304,32 @@ export default function App() {
     return data;
   };
 
-  const handleResetPassword = async (payload: { token: string; email?: string; newPassword: string }) => {
+  const handleResetPassword = async (
+    arg1: { token: string; email?: string; newPassword?: string; password?: string } | string,
+    arg2?: string,
+    arg3?: string
+  ) => {
+    let email = '';
+    let token = '';
+    let password = '';
+    if (typeof arg1 === 'object') {
+      email = arg1.email || '';
+      token = arg1.token || '';
+      password = arg1.newPassword || arg1.password || '';
+    } else {
+      email = arg1 || '';
+      token = arg2 || '';
+      password = arg3 || '';
+    }
     const response = await fetch(apiUrl('/api/auth/reset-password'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ 
+        email: email.trim().toLowerCase(), 
+        token: token.trim(), 
+        password, 
+        newPassword: password 
+      }),
     });
     const data = await readApiResponse(response);
     if (!response.ok) throw new Error(data.error || 'Failed to reset password.');
@@ -451,6 +488,7 @@ export default function App() {
         onForgotPassword={handleForgotPassword}
         onResetPassword={handleResetPassword}
         errorMessage={authError}
+        successMessage={authorityNotice}
         isSubmitting={authSubmitting}
       />
     );
