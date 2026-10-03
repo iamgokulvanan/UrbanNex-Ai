@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import { 
   Bus, 
   Detection, 
@@ -20,8 +21,12 @@ import {
   AlertTriangle, 
   CheckCircle,
   ExternalLink,
-  Info
+  Info,
+  Globe,
+  Maximize2
 } from 'lucide-react';
+
+export type MapTileStyle = 'streets' | 'satellite' | 'voyager' | 'dark';
 
 interface MapViewProps {
   buses: Bus[];
@@ -53,9 +58,15 @@ export const MapView: React.FC<MapViewProps> = ({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
 
+  const baseTileLayerRef = useRef<L.TileLayer | null>(null);
+  const labelsTileLayerRef = useRef<L.TileLayer | null>(null);
+
   const busMarkersRef = useRef<Record<string, L.Marker>>({});
   const detectionMarkersRef = useRef<Record<string, L.Marker>>({});
   const routeLayersRef = useRef<Record<string, L.Polyline>>({});
+
+  // Map Tile Style state - default to real OpenStreetMap streets
+  const [mapStyle, setMapStyle] = useState<MapTileStyle>('streets');
 
   // Layer visibility toggles
   const [showBuses, setShowBuses] = useState(true);
@@ -78,34 +89,92 @@ export const MapView: React.FC<MapViewProps> = ({
     }
   };
 
-  // 1. Initialize Map Instance
+  // 1. Initialize Map Instance with robust sizing
   useEffect(() => {
     if (!mapContainerRef.current) return;
     if (mapInstanceRef.current) return;
 
-    // Create Leaflet Map with smooth carto positron light tiles
+    // Create Leaflet Map with smooth interaction
     const map = L.map(mapContainerRef.current, {
       center: CITY_CENTER,
       zoom: 13,
       zoomControl: false,
     });
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; <a href="https://carto.com/">CartoDB</a> & OpenStreetMap',
-      subdomains: 'abcd',
-      maxZoom: 19,
-    }).addTo(map);
-
     L.control.zoom({ position: 'topright' }).addTo(map);
     mapInstanceRef.current = map;
 
+    // Invalidate size immediately and on slight delay to avoid partial grey tiles
+    const t1 = setTimeout(() => map.invalidateSize(), 100);
+    const t2 = setTimeout(() => map.invalidateSize(), 350);
+
+    // ResizeObserver ensures map always adapts when window/drawer changes
+    const resizeObserver = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    if (mapContainerRef.current) {
+      resizeObserver.observe(mapContainerRef.current);
+    }
+
     return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      resizeObserver.disconnect();
       map.remove();
       mapInstanceRef.current = null;
     };
   }, []);
 
-  // 2. Draw Routes
+  // 2. Real Map Tile Layers (Streets, Satellite, Voyager, Dark)
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (baseTileLayerRef.current) {
+      baseTileLayerRef.current.remove();
+      baseTileLayerRef.current = null;
+    }
+    if (labelsTileLayerRef.current) {
+      labelsTileLayerRef.current.remove();
+      labelsTileLayerRef.current = null;
+    }
+
+    if (mapStyle === 'streets') {
+      // Real OpenStreetMap Standard (Full roads, avenues, buildings, labels)
+      baseTileLayerRef.current = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
+        maxZoom: 19,
+      }).addTo(map);
+    } else if (mapStyle === 'satellite') {
+      // High-resolution real aerial satellite imagery (Esri World Imagery)
+      baseTileLayerRef.current = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri, Maxar, Earthstar Geographics',
+        maxZoom: 19,
+      }).addTo(map);
+
+      // Roads & place names overlay on top of satellite imagery
+      labelsTileLayerRef.current = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+        attribution: '',
+        maxZoom: 19,
+      }).addTo(map);
+    } else if (mapStyle === 'voyager') {
+      // Carto Voyager Detailed Urban Map
+      baseTileLayerRef.current = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://carto.com/">CartoDB</a> & OpenStreetMap',
+        subdomains: 'abcd',
+        maxZoom: 19,
+      }).addTo(map);
+    } else {
+      // Tactical Dark Matter Navigation
+      baseTileLayerRef.current = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://carto.com/">CartoDB</a> & OpenStreetMap',
+        subdomains: 'abcd',
+        maxZoom: 19,
+      }).addTo(map);
+    }
+  }, [mapStyle]);
+
+  // 3. Draw Transit Routes
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
@@ -120,7 +189,7 @@ export const MapView: React.FC<MapViewProps> = ({
       const polyline = L.polyline(route.waypoints, {
         color: route.color,
         weight: 4,
-        opacity: 0.65,
+        opacity: mapStyle === 'satellite' ? 0.85 : 0.65,
         dashArray: '6, 6',
       }).addTo(map);
 
@@ -131,9 +200,9 @@ export const MapView: React.FC<MapViewProps> = ({
 
       routeLayersRef.current[route.id] = polyline;
     });
-  }, [routes, showRoutes]);
+  }, [routes, showRoutes, mapStyle]);
 
-  // 3. Update or create Bus Markers smoothly
+  // 4. Update or create Bus Markers smoothly
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
@@ -180,12 +249,10 @@ export const MapView: React.FC<MapViewProps> = ({
       });
 
       if (busMarkersRef.current[bus.id]) {
-        // Update position smoothly
         const marker = busMarkersRef.current[bus.id];
         marker.setLatLng([bus.latitude, bus.longitude]);
         marker.setIcon(customIcon);
       } else {
-        // Create new marker
         const marker = L.marker([bus.latitude, bus.longitude], { icon: customIcon }).addTo(map);
 
         marker.on('click', () => {
@@ -243,7 +310,7 @@ export const MapView: React.FC<MapViewProps> = ({
     });
   }, [buses, showBuses, selectedBusId, onSelectBus]);
 
-  // 4. Update or create Detection Markers
+  // 5. Update or create Detection Markers
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
@@ -409,93 +476,181 @@ export const MapView: React.FC<MapViewProps> = ({
     }
   };
 
+  // Zoom to all active buses bounds
+  const handleFitBuses = () => {
+    const map = mapInstanceRef.current;
+    if (!map || buses.length === 0) return;
+    const group = L.featureGroup(Object.values(busMarkersRef.current));
+    if (group.getBounds().isValid()) {
+      map.fitBounds(group.getBounds().pad(0.2), { animate: true });
+    }
+  };
+
   return (
     <div className={`relative w-full ${heightClass} bg-slate-100 overflow-hidden`}>
       {/* Map Container */}
       <div ref={mapContainerRef} className="w-full h-full z-10" />
 
       {/* Top Floating Controls Bar */}
-      <div className="absolute top-3 left-3 right-3 sm:right-auto z-20 flex flex-wrap items-center gap-2 pointer-events-auto">
-        {/* Layer Toggles Group */}
-        <div className="bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-1 shadow-md flex items-center gap-1 text-xs">
-          <button
-            onClick={() => setShowBuses(!showBuses)}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
-              showBuses ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <BusIcon className="w-3.5 h-3.5" />
-            <span>Buses ({buses.length})</span>
-          </button>
+      <div className="absolute top-3 left-3 right-3 z-20 flex flex-wrap items-center justify-between gap-2 pointer-events-auto">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Real Map Style Switcher */}
+          <div className="bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-1 shadow-md flex items-center gap-1 text-xs">
+            <span className="text-[10px] font-bold uppercase text-slate-400 px-1.5 hidden md:inline">Map Mode:</span>
+            <button
+              type="button"
+              onClick={() => setMapStyle('streets')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                mapStyle === 'streets' 
+                  ? 'bg-blue-600 text-white shadow-xs' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+              title="Real-World OpenStreetMap with Street Names & Landmarks"
+            >
+              <span>🗺️</span>
+              <span>Streets</span>
+            </button>
 
-          <button
-            onClick={() => setShowDetections(!showDetections)}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
-              showDetections ? 'bg-orange-50 text-orange-700 font-semibold' : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <AlertTriangle className="w-3.5 h-3.5" />
-            <span>Detections ({detections.length})</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setMapStyle('satellite')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                mapStyle === 'satellite' 
+                  ? 'bg-blue-600 text-white shadow-xs' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+              title="Real World High-Resolution Aerial Satellite Imagery"
+            >
+              <span>🛰️</span>
+              <span>Satellite</span>
+            </button>
 
-          <button
-            onClick={() => setShowRoutes(!showRoutes)}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
-              showRoutes ? 'bg-purple-50 text-purple-700 font-semibold' : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span>Routes</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setMapStyle('voyager')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                mapStyle === 'voyager' 
+                  ? 'bg-blue-600 text-white shadow-xs' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+              title="Carto Voyager Vibrant Urban Map"
+            >
+              <span>🏙️</span>
+              <span className="hidden sm:inline">Voyager</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setMapStyle('dark')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                mapStyle === 'dark' 
+                  ? 'bg-slate-900 text-white shadow-xs' 
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+              title="Night Command Tactical Dark Map"
+            >
+              <span>🌙</span>
+              <span className="hidden sm:inline">Dark</span>
+            </button>
+          </div>
+
+          {/* Layer Toggles Group */}
+          <div className="bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-1 shadow-md flex items-center gap-1 text-xs">
+            <button
+              onClick={() => setShowBuses(!showBuses)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
+                showBuses ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <BusIcon className="w-3.5 h-3.5" />
+              <span>Buses ({buses.length})</span>
+            </button>
+
+            <button
+              onClick={() => setShowDetections(!showDetections)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
+                showDetections ? 'bg-orange-50 text-orange-700 font-semibold' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Detections ({detections.length})</span>
+            </button>
+
+            <button
+              onClick={() => setShowRoutes(!showRoutes)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
+                showRoutes ? 'bg-purple-50 text-purple-700 font-semibold' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Routes</span>
+            </button>
+          </div>
         </div>
 
-        {/* Filters Group */}
-        <div className="bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-1 shadow-md flex items-center gap-1 text-xs">
-          {/* Type Filter */}
-          <select
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value as any)}
-            className="bg-transparent px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer"
-          >
-            <option value="all">All Anomaly Types</option>
-            <option value="pothole">Potholes</option>
-            <option value="waterlogging">Waterlogging</option>
-            <option value="road_damage">Road Damage</option>
-            <option value="congestion">Traffic Congestion</option>
-            <option value="pedestrian_risk">Pedestrian Risk</option>
-          </select>
+        {/* Filters & Navigation Controls */}
+        <div className="flex items-center gap-2">
+          {/* Filters Group */}
+          <div className="bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-1 shadow-md flex items-center gap-1 text-xs">
+            {/* Type Filter */}
+            <select
+              value={filterType}
+              onChange={(e) => setFilterType(e.target.value as any)}
+              className="bg-transparent px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer"
+            >
+              <option value="all">All Anomaly Types</option>
+              <option value="pothole">Potholes</option>
+              <option value="waterlogging">Waterlogging</option>
+              <option value="road_damage">Road Damage</option>
+              <option value="congestion">Traffic Congestion</option>
+              <option value="pedestrian_risk">Pedestrian Risk</option>
+            </select>
 
-          <div className="h-4 w-px bg-slate-200" />
+            <div className="h-4 w-px bg-slate-200" />
 
-          {/* Severity Filter */}
-          <select
-            value={filterSeverity}
-            onChange={(e) => setFilterSeverity(e.target.value as any)}
-            className="bg-transparent px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer"
+            {/* Severity Filter */}
+            <select
+              value={filterSeverity}
+              onChange={(e) => setFilterSeverity(e.target.value as any)}
+              className="bg-transparent px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer"
+            >
+              <option value="all">All Severities</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+
+          {/* Quick Fit Fleet Button */}
+          <button
+            onClick={handleFitBuses}
+            className="bg-white/95 backdrop-blur-xs hover:bg-white text-slate-700 px-2.5 py-2 rounded-xl shadow-md border border-slate-200 text-xs font-bold transition flex items-center gap-1"
+            title="Fit Fleet View"
           >
-            <option value="all">All Severities</option>
-            <option value="critical">Critical</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
+            <Maximize2 className="w-3.5 h-3.5 text-blue-600" />
+            <span className="hidden md:inline">Fit Fleet</span>
+          </button>
+
+          {/* Recenter Button */}
+          <button
+            onClick={handleRecenter}
+            className="bg-white/95 backdrop-blur-xs hover:bg-white text-slate-700 p-2 rounded-xl shadow-md border border-slate-200 transition-colors"
+            title="Recenter Map to Gandhipuram City Center"
+          >
+            <Navigation className="w-4 h-4 text-blue-600" />
+          </button>
         </div>
-
-        {/* Recenter Button */}
-        <button
-          onClick={handleRecenter}
-          className="bg-white/95 backdrop-blur-xs hover:bg-white text-slate-700 p-2 rounded-xl shadow-md border border-slate-200 transition-colors"
-          title="Recenter Map"
-        >
-          <Navigation className="w-4 h-4 text-blue-600" />
-        </button>
       </div>
 
       {/* Floating Legend in Bottom Left */}
       <div className="absolute bottom-4 left-4 z-20">
         <div className="bg-white/95 backdrop-blur-xs border border-slate-200 rounded-2xl p-3 shadow-lg max-w-xs text-xs">
           <div className="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-100">
-            <span className="font-bold text-slate-800 text-[11px] tracking-wide">GIS MAP LEGEND</span>
+            <span className="font-bold text-slate-800 text-[11px] tracking-wide flex items-center gap-1.5">
+              <Globe className="w-3.5 h-3.5 text-blue-600" />
+              LIVE GIS MAP LEGEND
+            </span>
             <button
               onClick={() => setShowLegend(!showLegend)}
               className="text-slate-400 hover:text-slate-700"

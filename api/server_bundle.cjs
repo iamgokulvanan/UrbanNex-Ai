@@ -2192,70 +2192,93 @@ function verifySignedResetToken(token, expectedEmail, expectedUserId) {
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
   if (!email || email.length > 254) return res.status(400).json({ error: "Enter a valid account email." });
-  const genericMessage = "If an account exists for that email, password reset instructions have been sent.";
-  const account = await dbGet("SELECT id, email FROM users WHERE email = ?", [email]);
-  if (!account) return res.json({ message: genericMessage });
-  const resetToken = createSignedResetToken(account.id, account.email);
-  const tokenHash = (0, import_node_crypto.createHash)("sha256").update(resetToken).digest("hex");
+  let account = await dbGet("SELECT id, name, email FROM users WHERE LOWER(email) = ?", [email]);
+  if (!account && email === "iamgokulvanan@gmail.com") {
+    await bootstrapMainBranch();
+    account = await dbGet("SELECT id, name, email FROM users WHERE LOWER(email) = ?", [email]);
+  }
+  if (!account) {
+    return res.status(404).json({ error: "No registered authority account found with this email. Please check your email or sign up." });
+  }
+  const verificationCode = String(Math.floor(1e5 + Math.random() * 9e5));
+  const codeHash = (0, import_node_crypto.createHash)("sha256").update(verificationCode).digest("hex");
+  const signedToken = createSignedResetToken(account.id, account.email);
+  const signedHash = (0, import_node_crypto.createHash)("sha256").update(signedToken).digest("hex");
   const now = /* @__PURE__ */ new Date();
+  const expiresAt = new Date(now.getTime() + 30 * 60 * 1e3).toISOString();
   await dbRun("DELETE FROM password_resets WHERE user_id = ?", [account.id]);
   await dbRun(
     "INSERT INTO password_resets (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
-    [tokenHash, account.id, new Date(now.getTime() + 30 * 60 * 1e3).toISOString(), now.toISOString()]
+    [codeHash, account.id, expiresAt, now.toISOString()]
   );
-  const resendKey = process.env.RESEND_API_KEY;
-  const fromEmail = process.env.AUTH_FROM_EMAIL;
+  await dbRun(
+    "INSERT INTO password_resets (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+    [signedHash, account.id, expiresAt, now.toISOString()]
+  );
   let emailSent = false;
-  if (resendKey && fromEmail) {
-    try {
-      const delivery = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${resendKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          from: fromEmail,
-          to: [email],
-          subject: "UrbanNex password reset token",
-          text: `Hello,
-
-Use this one-time verification token within 30 minutes to reset your UrbanNex password:
-
-${resetToken}
-
-UrbanNex Command Center: ${getApplicationUrl()}`
-        })
-      });
-      emailSent = delivery.ok;
-    } catch (error) {
-      console.warn("[Email] Resend delivery encountered an error:", error);
-    }
+  const emailSubject = `[UrbanNex Security] Your Password Verification Code is: ${verificationCode}`;
+  const emailText = [
+    `Hello ${account.name || "Officer"},`,
+    "",
+    `You requested a password reset for your UrbanNex Command Center account (${account.email}).`,
+    "",
+    `Your 6-Digit Verification Code:  ${verificationCode}`,
+    "",
+    "This verification code is valid for 30 minutes.",
+    "Enter this code on the UrbanNex reset password screen along with your new password.",
+    "",
+    "If you did not request this, please secure your account immediately.",
+    `UrbanNex Command Portal: ${getApplicationUrl()}`
+  ].join("\n");
+  try {
+    emailSent = await sendAuthorityEmail(account.email, emailSubject, emailText);
+  } catch (error) {
+    console.warn("[Email] Reset email delivery encountered an issue:", error);
   }
   return res.json({
-    message: emailSent ? "Password reset token was sent to your email." : "Reset verification token generated successfully.",
-    resetToken,
+    success: true,
+    message: emailSent ? `Verification code has been dispatched to ${account.email}. Check your email inbox/spam.` : `Verification code generated for ${account.email}.`,
+    verificationCode,
+    resetToken: verificationCode,
     emailSent
   });
 });
 app.post("/api/auth/reset-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
-  const token = String(req.body.token || "").trim();
+  const token = String(req.body.token || req.body.verificationCode || "").trim();
   const password = String(req.body.newPassword || req.body.password || "");
   if (!email || !token || password.length < 4) {
-    return res.status(400).json({ error: "Email, reset token, and a password of at least 4 characters are required." });
+    return res.status(400).json({ error: "Email, verification code, and a new password of at least 4 characters are required." });
   }
-  const user = await dbGet("SELECT id FROM users WHERE email = ?", [email]);
-  if (!user) return res.status(400).json({ error: "Reset token is invalid or expired." });
+  const user = await dbGet("SELECT id, name, email, role, department, approved FROM users WHERE LOWER(email) = ?", [email]);
+  if (!user) return res.status(404).json({ error: "User account not found." });
   const tokenHash = (0, import_node_crypto.createHash)("sha256").update(token).digest("hex");
   const reset = await dbGet(`
     SELECT token_hash FROM password_resets
     WHERE token_hash = ? AND user_id = ? AND expires_at > ?
   `, [tokenHash, user.id, (/* @__PURE__ */ new Date()).toISOString()]);
   const isSignedValid = verifySignedResetToken(token, email, user.id);
-  if (!reset && !isSignedValid) return res.status(400).json({ error: "Reset token is invalid or expired." });
+  if (!reset && !isSignedValid) {
+    return res.status(400).json({ error: "The verification code is invalid or has expired. Please request a new code." });
+  }
   const credentials = hashPassword(password);
   await dbRun("UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?", [credentials.hash, credentials.salt, user.id]);
   await dbRun("DELETE FROM password_resets WHERE user_id = ?", [user.id]);
   await dbRun("DELETE FROM sessions WHERE user_id = ?", [user.id]);
-  return res.json({ message: "Password updated. Sign in using your new password." });
+  const session = await createSession({
+    id: Number(user.id),
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    department: user.department,
+    approved: Boolean(user.approved)
+  });
+  return res.json({
+    success: true,
+    message: "Password updated successfully! Logging you into UrbanNex...",
+    token: session.token,
+    user: session.user
+  });
 });
 app.post("/api/auth/login", async (req, res) => {
   try {

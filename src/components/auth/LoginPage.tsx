@@ -136,15 +136,20 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     try {
       if (onForgotPassword) {
         const data = await onForgotPassword(forgotEmail.trim());
-        const token = data.resetToken || data.developmentToken;
+        const token = data.verificationCode || data.resetToken || data.developmentToken;
         if (token) {
           setResetToken(token);
         }
-        setForgotNotice(data.message || 'Verification token generated successfully.');
+        setForgotNotice(
+          data.message || 
+          (data.emailSent 
+            ? `Verification code dispatched to ${forgotEmail}. Please check your email inbox.` 
+            : `Verification code generated for ${forgotEmail}.`)
+        );
         setForgotStep(2);
       }
     } catch (err: any) {
-      setForgotError(err?.message || 'Could not send verification token.');
+      setForgotError(err?.message || 'Could not send verification token. Verify email address.');
     } finally {
       setForgotLoading(false);
     }
@@ -164,7 +169,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           newPassword,
           password: newPassword,
         });
-        setForgotNotice(data.message || 'Password successfully updated! Returning to login...');
+        setForgotNotice(data?.message || 'Password updated successfully! Logging you into Command Center...');
         setTimeout(() => {
           setPassword(newPassword);
           setEmail(forgotEmail);
@@ -173,10 +178,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           setForgotStep(1);
           setForgotNotice('');
           setForgotError('');
-        }, 1200);
+        }, 800);
       }
     } catch (err: any) {
-      setForgotError(err?.message || 'Could not reset password. Check your token.');
+      setForgotError(err?.message || 'Could not reset password. Check your verification code.');
     } finally {
       setForgotLoading(false);
     }
@@ -324,8 +329,27 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   </form>
                 ) : (
                   <form onSubmit={handleApplyReset} className="space-y-4">
+                    {resetToken && (
+                      <div className="rounded-xl border border-cyan-200 bg-cyan-50/80 p-3 flex items-center justify-between text-xs">
+                        <div>
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-cyan-800">Verification Code</p>
+                          <p className="font-mono text-sm font-extrabold tracking-widest text-cyan-950 mt-0.5">{resetToken}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(resetToken);
+                            setForgotNotice('Verification code copied to clipboard!');
+                          }}
+                          className="px-2.5 py-1 bg-white hover:bg-cyan-100/60 border border-cyan-200 text-cyan-900 rounded-lg text-xs font-bold transition shadow-2xs cursor-pointer"
+                        >
+                          Copy Code
+                        </button>
+                      </div>
+                    )}
+
                     <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">Verification token</label>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">6-Digit Verification Code</label>
                       <div className="relative">
                         <KeyRound className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
                         <input
@@ -333,8 +357,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                           type="text"
                           value={resetToken}
                           onChange={(e) => setResetToken(e.target.value)}
-                          placeholder="Paste verification token"
-                          className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-xs font-mono text-slate-900 outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-600/20"
+                          placeholder="Enter 6-digit code or paste token"
+                          className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-xs font-mono font-bold tracking-wider text-slate-900 outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-600/20"
                         />
                       </div>
                     </div>
@@ -349,7 +373,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                           type={showNewPassword ? 'text' : 'password'}
                           value={newPassword}
                           onChange={(e) => setNewPassword(e.target.value)}
-                          placeholder="Enter new password"
+                          placeholder="Enter new secure password"
                           className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-10 text-xs text-slate-900 outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-600/20"
                         />
                         <button
@@ -365,9 +389,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     <button
                       type="submit"
                       disabled={forgotLoading}
-                      className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white py-3 text-xs font-bold shadow-md transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                      className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white py-3.5 text-xs font-bold shadow-md transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
                     >
-                      {forgotLoading ? 'Updating password...' : 'Update password & log in'}
+                      {forgotLoading ? 'Updating password...' : 'Update Password & Enter Command Center'}
                       {!forgotLoading && <CheckCircle2 className="h-4 w-4" />}
                     </button>
 

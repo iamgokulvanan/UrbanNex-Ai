@@ -445,6 +445,12 @@ export default function App() {
     });
     const data = await readApiResponse(response);
     if (!response.ok) throw new Error(data.error || 'Failed to reset password.');
+    if (data.token && data.user) {
+      localStorage.setItem('urbannex-token', data.token);
+      setSessionToken(data.token);
+      setUser(data.user);
+      setAuthMode(null);
+    }
     return data;
   };
 
