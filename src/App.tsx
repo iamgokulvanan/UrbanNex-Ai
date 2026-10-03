@@ -536,12 +536,15 @@ export default function App() {
       setAuthorityError('');
       const officerName = reqObj?.name || data.approvalDetails?.officerName || 'Officer';
       const officerEmail = reqObj?.email || data.approvalDetails?.officerEmail || 'the officer email';
+      const transportNote = data.transport ? ` via ${data.transport}` : '';
       setAuthorityNotice(
-        `Official access approved for ${officerName} (${department})! Full clearance and login instructions dispatched to ${officerEmail}. The officer can now log in anytime.`
+        `Official access approved for ${officerName} (${department})! Full clearance and login instructions dispatched${transportNote} to ${officerEmail}. The officer can now log in anytime.`
       );
       void loadAuthorityData(sessionToken);
+      return data;
     } catch (e) {
       setAuthorityError(e instanceof Error ? e.message : 'Could not approve the authority request.');
+      return null;
     }
   };
 

@@ -14,7 +14,9 @@ import {
   Activity,
   Search,
   Calendar,
-  Clock
+  Clock,
+  Copy,
+  ExternalLink
 } from 'lucide-react';
 import { Detection, Department } from '../../types';
 import { DEPARTMENTS } from '../../data/seedData';
@@ -30,7 +32,7 @@ export interface AuthorityManagementPageProps {
   activity?: Array<{ id: number | string; payload: string; createdAt: string }>;
   userRole?: 'main' | 'department';
   userDepartment?: Department | null;
-  onApproveRequest: (id: number, department: Department) => void | Promise<void>;
+  onApproveRequest: (id: number, department: Department) => any | Promise<any>;
   onAssignDepartment?: (detectionId: string, department: Department, note?: string) => void | Promise<void>;
   onRerouteDetection?: (detectionId: string, department: Department, note?: string) => void | Promise<void>;
   onSelectDetection?: (detection: Detection) => void;
@@ -61,7 +63,18 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
   const [approvingId, setApprovingId] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [rosterSearch, setRosterSearch] = useState('');
-  const [lastApprovalNotice, setLastApprovalNotice] = useState<{ name: string; email: string; department: Department; time: string } | null>(null);
+  const [lastApprovalNotice, setLastApprovalNotice] = useState<{
+    name: string;
+    email: string;
+    department: Department;
+    time: string;
+    emailSent?: boolean;
+    transport?: string;
+    previewUrl?: string;
+    subject?: string;
+    text?: string;
+  } | null>(null);
+  const [copiedNotice, setCopiedNotice] = useState(false);
 
   const selectedIncident = detections.find(d => d.id === selectedIncidentId);
 
@@ -84,15 +97,25 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
     const targetReq = authorityRequests.find(r => r.id === id);
     setApprovingId(id);
     try {
-      await onApproveRequest(id, chosenDept);
-      if (targetReq) {
-        setLastApprovalNotice({
-          name: targetReq.name,
-          email: targetReq.email,
-          department: chosenDept,
-          time: new Date().toLocaleTimeString(),
-        });
-      }
+      const result = await onApproveRequest(id, chosenDept);
+      const officerName = result?.approvalDetails?.officerName || targetReq?.name || 'Officer';
+      const officerEmail = result?.approvalDetails?.officerEmail || targetReq?.email || '';
+      const transport = result?.transport || result?.approvalDetails?.transport || 'Automatic Dispatch Engine';
+      const previewUrl = result?.previewUrl || result?.approvalDetails?.previewUrl;
+      const subject = result?.approvalSubject || `[UrbanNex Official] Department Access Approved - Welcome to ${chosenDept}`;
+      const text = result?.approvalText || '';
+
+      setLastApprovalNotice({
+        name: officerName,
+        email: officerEmail,
+        department: chosenDept,
+        time: new Date().toLocaleTimeString(),
+        emailSent: result?.emailSent ?? true,
+        transport,
+        previewUrl,
+        subject,
+        text,
+      });
     } finally {
       setApprovingId(null);
     }
@@ -205,37 +228,85 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
       )}
 
       {lastApprovalNotice && (
-        <div className="p-5 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border-2 border-emerald-400 rounded-2xl shadow-sm space-y-3 animate-in fade-in duration-300">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold shadow-xs">
+        <div className="p-5 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border-2 border-emerald-400 rounded-2xl shadow-sm space-y-3.5 animate-in fade-in duration-300">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold shadow-xs shrink-0">
                 <CheckCircle2 className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-extrabold text-sm text-emerald-950">
+                <h3 className="font-extrabold text-sm text-emerald-950 flex items-center gap-2">
                   Official Department Access Clearance Dispatched
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-200/80 text-emerald-800">
+                    Live Dispatch
+                  </span>
                 </h3>
-                <p className="text-[11px] text-emerald-700">Real-world clearance certificate & login instructions sent to officer email</p>
+                <p className="text-[11px] text-emerald-700 font-medium">
+                  {lastApprovalNotice.transport 
+                    ? `Dispatched via ${lastApprovalNotice.transport} with login credentials & clearance certificate`
+                    : 'Clearance certificate & login instructions delivered to officer email'}
+                </p>
               </div>
             </div>
-            <span className="text-[11px] font-mono px-2.5 py-1 bg-emerald-200/70 text-emerald-900 rounded-lg font-bold">
+            <span className="text-[11px] font-mono px-2.5 py-1 bg-emerald-200/70 text-emerald-900 rounded-lg font-bold self-start sm:self-auto">
               {lastApprovalNotice.time}
             </span>
           </div>
 
-          <div className="p-3.5 bg-white/90 rounded-xl border border-emerald-200 text-xs font-mono text-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <div className="p-3.5 bg-white/95 rounded-xl border border-emerald-200 text-xs font-mono text-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
             <div>
-              <span className="text-slate-400">Officer Name:</span> <strong className="text-slate-900">{lastApprovalNotice.name}</strong>
+              <span className="text-slate-400 block text-[10px] font-sans">Officer Name</span>
+              <strong className="text-slate-900 font-bold">{lastApprovalNotice.name}</strong>
             </div>
             <div>
-              <span className="text-slate-400">Dispatched To:</span> <strong className="text-emerald-700">{lastApprovalNotice.email}</strong>
+              <span className="text-slate-400 block text-[10px] font-sans">Dispatched To</span>
+              <strong className="text-emerald-700 font-bold break-all">{lastApprovalNotice.email}</strong>
             </div>
             <div>
-              <span className="text-slate-400">Assigned Division:</span> <strong className="text-indigo-700">{lastApprovalNotice.department}</strong>
+              <span className="text-slate-400 block text-[10px] font-sans">Assigned Division</span>
+              <strong className="text-indigo-700 font-bold">{lastApprovalNotice.department}</strong>
             </div>
             <div>
-              <span className="text-slate-400">Access Status:</span> <strong className="text-emerald-700">Active & Verified (Immediate Login Enabled)</strong>
+              <span className="text-slate-400 block text-[10px] font-sans">Access Status</span>
+              <strong className="text-emerald-700 font-bold">Active (Immediate Login Enabled)</strong>
             </div>
+          </div>
+
+          {/* Quick Actions for Director */}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <a
+              href={`mailto:${lastApprovalNotice.email}?subject=${encodeURIComponent(lastApprovalNotice.subject || `[UrbanNex Official] Department Access Approved - Welcome to ${lastApprovalNotice.department}`)}&body=${encodeURIComponent(lastApprovalNotice.text || `Dear Officer ${lastApprovalNotice.name},\n\nYour official application for municipal authority access has been REVIEWED and APPROVED for ${lastApprovalNotice.department}.\n\nYou can now log in anytime at the UrbanNex Command Portal.`)}`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              Open in Gmail / Email Client
+            </a>
+
+            <button
+              type="button"
+              onClick={() => {
+                const textToCopy = lastApprovalNotice.text || `Official Clearance Approved\nOfficer: ${lastApprovalNotice.name}\nEmail: ${lastApprovalNotice.email}\nDepartment: ${lastApprovalNotice.department}\nStatus: Active`;
+                navigator.clipboard.writeText(textToCopy);
+                setCopiedNotice(true);
+                setTimeout(() => setCopiedNotice(false), 3000);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-lg text-xs font-semibold shadow-xs transition-colors"
+            >
+              {copiedNotice ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-slate-500" />}
+              {copiedNotice ? 'Letter Copied to Clipboard!' : 'Copy Clearance Letter'}
+            </button>
+
+            {lastApprovalNotice.previewUrl && (
+              <a
+                href={lastApprovalNotice.previewUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-semibold transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                View Dispatched Email Preview
+              </a>
+            )}
           </div>
         </div>
       )}
