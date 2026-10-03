@@ -110,6 +110,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [approvalInfo, setApprovalInfo] = useState<{ isApproved: boolean; department?: Department; badge?: string } | null>(null);
 
+  // Forgot password states
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotError, setForgotError] = useState('');
+  const [forgotNotice, setForgotNotice] = useState('');
+  const [resetToken, setResetToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+
   // Auto-detect approval status when officer email is provided
   useEffect(() => {
     if (activeMode !== 'login' || authorityDesk === 'main') {

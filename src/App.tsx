@@ -16,7 +16,7 @@ import { RealVideoDetection } from './components/detections/RealVideoDetection';
 import { DetectionDrawer } from './components/detections/DetectionDrawer';
 import { LoginPage } from './components/auth/LoginPage';
 import { AuthorityManagementPage } from './components/authorities/AuthorityManagementPage';
-import { Detection, Bus, Department, DetectionType } from './types';
+import { Detection, Bus, Department, DetectionType, IncidentStatus } from './types';
 import { DEPARTMENTS, isDetectionSuitableForDepartment } from './data/seedData';
 import { 
   LayoutDashboard, 
