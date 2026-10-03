@@ -120,11 +120,19 @@ var ResilientStore = class {
     if (cleanSql.startsWith("SELECT 1")) {
       return { 1: 1 };
     }
-    if (cleanSql.includes("FROM users WHERE id = ? OR email = ?")) {
-      const id = Number(params[0]);
-      const email = String(params[1] || "").toLowerCase();
-      const user = this.users.find((u) => id && Number(u.id) === id || email && u.email.toLowerCase() === email);
-      return user ? { ...user } : void 0;
+    if (cleanSql.includes("FROM users") && (cleanSql.includes("OR id = ?") || cleanSql.includes("OR email = ?") || cleanSql.includes("OR LOWER(email) = ?"))) {
+      for (const p of params) {
+        if (typeof p === "string" && p.includes("@")) {
+          const user = this.users.find((u) => u.email.toLowerCase() === p.toLowerCase().trim());
+          if (user) return { ...user };
+        }
+        const num = Number(p);
+        if (!isNaN(num) && num > 0) {
+          const user = this.users.find((u) => Number(u.id) === num);
+          if (user) return { ...user };
+        }
+      }
+      return void 0;
     }
     if (cleanSql.includes("FROM users") && (cleanSql.includes("email = ?") || cleanSql.includes("LOWER(email) = ?"))) {
       const email = String(params[params.length - 1] || params[0] || "").toLowerCase();
@@ -2534,7 +2542,7 @@ app.post("/api/admin/authority-requests/:id/approve", async (req, res) => {
     `, [name, targetEmail, creds.hash, creds.salt, department, department, (/* @__PURE__ */ new Date()).toISOString()]);
   }
   if (!result.changes) return res.status(404).json({ error: "Authority request not found." });
-  const account = await dbGet("SELECT name, email FROM users WHERE LOWER(email) = ? OR id = ?", [targetEmail || "", targetId || 0]);
+  const account = targetEmail ? await dbGet("SELECT name, email FROM users WHERE email = ?", [targetEmail]) : targetId ? await dbGet("SELECT name, email FROM users WHERE id = ?", [targetId]) : null;
   if (!account) return res.status(404).json({ error: "Authority request not found." });
   let emailSent = false;
   try {

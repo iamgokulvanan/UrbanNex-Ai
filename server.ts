@@ -1393,7 +1393,9 @@ app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
 
   if (!result.changes) return res.status(404).json({ error: 'Authority request not found.' });
 
-  const account = await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE LOWER(email) = ? OR id = ?', [targetEmail || '', targetId || 0]);
+  const account = targetEmail 
+    ? await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE email = ?', [targetEmail])
+    : (targetId ? await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE id = ?', [targetId]) : null);
   if (!account) return res.status(404).json({ error: 'Authority request not found.' });
 
   let emailSent = false;

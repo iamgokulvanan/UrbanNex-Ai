@@ -84,11 +84,19 @@ class ResilientStore {
     if (cleanSql.startsWith('SELECT 1')) {
       return { 1: 1 };
     }
-    if (cleanSql.includes('FROM users WHERE id = ? OR email = ?')) {
-      const id = Number(params[0]);
-      const email = String(params[1] || '').toLowerCase();
-      const user = this.users.find(u => (id && Number(u.id) === id) || (email && u.email.toLowerCase() === email));
-      return user ? { ...user } : undefined;
+    if (cleanSql.includes('FROM users') && (cleanSql.includes('OR id = ?') || cleanSql.includes('OR email = ?') || cleanSql.includes('OR LOWER(email) = ?'))) {
+      for (const p of params) {
+        if (typeof p === 'string' && p.includes('@')) {
+          const user = this.users.find(u => u.email.toLowerCase() === p.toLowerCase().trim());
+          if (user) return { ...user };
+        }
+        const num = Number(p);
+        if (!isNaN(num) && num > 0) {
+          const user = this.users.find(u => Number(u.id) === num);
+          if (user) return { ...user };
+        }
+      }
+      return undefined;
     }
     if (cleanSql.includes('FROM users') && (cleanSql.includes('email = ?') || cleanSql.includes('LOWER(email) = ?'))) {
       const email = String(params[params.length - 1] || params[0] || '').toLowerCase();
