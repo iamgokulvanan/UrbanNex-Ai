@@ -187,7 +187,8 @@ export default function App() {
     password, 
     accountType, 
     department, 
-    action 
+    action,
+    approvalBadge,
   }: { 
     name: string; 
     email: string; 
@@ -195,6 +196,7 @@ export default function App() {
     accountType?: 'main' | 'department'; 
     department?: Department;
     action?: 'login' | 'signup';
+    approvalBadge?: string;
   }) => {
     setAuthSubmitting(true);
     setAuthError('');
@@ -205,12 +207,19 @@ export default function App() {
 
     // Resilience fallback: lookup client approved roster or registered authority profile if available
     let clientRosterUser: any = undefined;
+    let badge = approvalBadge;
     if (targetAction === 'login') {
       try {
+        if (!badge) {
+          badge = localStorage.getItem(`urbannex_badge_${normalizedEmail}`) || undefined;
+        }
         const raw = localStorage.getItem('urbannex_authority_approved_roster');
         if (raw) {
           const list = JSON.parse(raw);
           clientRosterUser = list.find((u: any) => u.email?.toLowerCase() === normalizedEmail);
+          if (clientRosterUser && !badge && clientRosterUser.approvalBadge) {
+            badge = clientRosterUser.approvalBadge;
+          }
         }
         if (!clientRosterUser) {
           const rawReg = localStorage.getItem('urbannex_registered_authority');
@@ -218,6 +227,7 @@ export default function App() {
             const reg = JSON.parse(rawReg);
             if (reg.email?.toLowerCase() === normalizedEmail) {
               clientRosterUser = reg;
+              if (!badge && reg.approvalBadge) badge = reg.approvalBadge;
             }
           }
         }
@@ -230,7 +240,7 @@ export default function App() {
         response = await fetch(apiUrl(endpoint), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password, accountType, department, clientRosterUser }),
+          body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password, accountType, department, clientRosterUser, approvalBadge: badge }),
         });
       } catch {
         let healthAvailable = false;
@@ -282,9 +292,41 @@ export default function App() {
         throw new ApiResponseError(data.error || 'Unable to authenticate.', response.status, data.code);
       }
       localStorage.setItem('urbannex-token', data.token);
+      localStorage.setItem('urbannex_last_login_email', data.user.email);
       setSessionToken(data.token);
       setUser(data.user);
       setAuthMode(null);
+
+      // Cache user into approved roster so any subsequent login from this device is instant
+      try {
+        const rawRoster = localStorage.getItem('urbannex_authority_approved_roster');
+        const rosterList: any[] = rawRoster ? JSON.parse(rawRoster) : [];
+        const filtered = rosterList.filter((u: any) => u.email?.toLowerCase() !== data.user.email.toLowerCase());
+        filtered.push({
+          id: data.user.id,
+          name: data.user.name,
+          email: data.user.email,
+          role: data.user.role,
+          department: data.user.department,
+          approved: 1,
+          passwordHash: data.credentials?.passwordHash || (clientRosterUser as any)?.passwordHash,
+          passwordSalt: data.credentials?.passwordSalt || (clientRosterUser as any)?.passwordSalt,
+        });
+        localStorage.setItem('urbannex_authority_approved_roster', JSON.stringify(filtered));
+
+        const rawReg = localStorage.getItem('urbannex_registered_authority');
+        if (rawReg) {
+          const reg = JSON.parse(rawReg);
+          if (reg?.email?.toLowerCase() === data.user.email.toLowerCase()) {
+            reg.approved = 1;
+            reg.department = data.user.department;
+            reg.role = data.user.role;
+            if (data.credentials?.passwordHash) reg.passwordHash = data.credentials.passwordHash;
+            if (data.credentials?.passwordSalt) reg.passwordSalt = data.credentials.passwordSalt;
+            localStorage.setItem('urbannex_registered_authority', JSON.stringify(reg));
+          }
+        }
+      } catch {}
     } catch (error) {
       if (error instanceof ApiResponseError) {
         if (error.code === 'INVALID_CREDENTIALS') {
@@ -400,17 +442,34 @@ export default function App() {
         const rawRoster = localStorage.getItem('urbannex_authority_approved_roster');
         const rosterList = rawRoster ? JSON.parse(rawRoster) : [];
         if (reqObj) {
+          if (data.approvalBadge && reqObj.email) {
+            localStorage.setItem(`urbannex_badge_${reqObj.email.toLowerCase()}`, data.approvalBadge);
+          }
           rosterList.push({
             id,
             name: reqObj.name,
             email: reqObj.email,
             role: 'department',
             department,
+            approved: 1,
+            approvalBadge: data.approvalBadge,
             createdAt: reqObj.createdAt,
             passwordHash: (reqObj as any)?.passwordHash,
             passwordSalt: (reqObj as any)?.passwordSalt,
           });
           localStorage.setItem('urbannex_authority_approved_roster', JSON.stringify(rosterList));
+
+          const rawReg = localStorage.getItem('urbannex_registered_authority');
+          if (rawReg) {
+            const reg = JSON.parse(rawReg);
+            if (reg?.email?.toLowerCase() === reqObj.email.toLowerCase()) {
+              reg.approved = 1;
+              reg.department = department;
+              reg.role = 'department';
+              if (data.approvalBadge) reg.approvalBadge = data.approvalBadge;
+              localStorage.setItem('urbannex_registered_authority', JSON.stringify(reg));
+            }
+          }
         }
       } catch {}
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ArrowRight, 
   BusFront, 
@@ -26,11 +26,12 @@ interface LoginPageProps {
     accountType: 'main' | 'department'; 
     department?: Department;
     action?: 'login' | 'signup';
+    approvalBadge?: string;
   }) => void | Promise<any>;
   errorMessage?: string;
   successMessage?: string;
   isSubmitting?: boolean;
-  onForgotPassword?: (email: string) => Promise<{ message?: string; resetToken?: string; developmentToken?: string }>;
+  onForgotPassword?: (email: string) => Promise<{ message?: string; resetToken?: string; developmentToken?: string; verificationCode?: string; emailSent?: boolean }>;
   onResetPassword?: (
     arg1: { token: string; email?: string; newPassword?: string; password?: string } | string,
     arg2?: string,
@@ -55,31 +56,122 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [activeMode, setActiveMode] = useState<'login' | 'signup'>(mode);
 
   // Authority desk switcher for login: 'department' or 'main'
-  const [authorityDesk, setAuthorityDesk] = useState<'department' | 'main'>('main');
+  const [authorityDesk, setAuthorityDesk] = useState<'department' | 'main'>(() => {
+    try {
+      const last = localStorage.getItem('urbannex_last_login_email');
+      if (last && last.toLowerCase() !== 'iamgokulvanan@gmail.com') return 'department';
+      const regRaw = localStorage.getItem('urbannex_registered_authority');
+      if (regRaw) {
+        const reg = JSON.parse(regRaw);
+        if (reg?.email && reg.email.toLowerCase() !== 'iamgokulvanan@gmail.com') return 'department';
+      }
+    } catch {}
+    return 'main';
+  });
 
   // Form inputs
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('iamgokulvanan@gmail.com');
-  const [password, setPassword] = useState('gokul123@');
-  const [department, setDepartment] = useState<Department>('Roads & Infrastructure');
+  const [email, setEmail] = useState(() => {
+    try {
+      const last = localStorage.getItem('urbannex_last_login_email');
+      if (last) return last;
+      const regRaw = localStorage.getItem('urbannex_registered_authority');
+      if (regRaw) {
+        const reg = JSON.parse(regRaw);
+        if (reg?.email) return reg.email;
+      }
+    } catch {}
+    return 'iamgokulvanan@gmail.com';
+  });
+  const [password, setPassword] = useState(() => {
+    try {
+      const last = localStorage.getItem('urbannex_last_login_email');
+      if (!last || last.toLowerCase() === 'iamgokulvanan@gmail.com') return 'gokul123@';
+    } catch {}
+    return '';
+  });
+  const [department, setDepartment] = useState<Department>(() => {
+    try {
+      const regRaw = localStorage.getItem('urbannex_registered_authority');
+      if (regRaw) {
+        const reg = JSON.parse(regRaw);
+        if (reg?.department && DEPARTMENTS.includes(reg.department)) return reg.department;
+        if (reg?.requestedDepartment && DEPARTMENTS.includes(reg.requestedDepartment)) return reg.requestedDepartment;
+      }
+    } catch {}
+    return 'Roads & Infrastructure';
+  });
   const [showPassword, setShowPassword] = useState(false);
+  const [approvalInfo, setApprovalInfo] = useState<{ isApproved: boolean; department?: Department; badge?: string } | null>(null);
 
-  // Forgot password state
-  const [forgotEmail, setForgotEmail] = useState('');
-  const [resetToken, setResetToken] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [showNewPassword, setShowNewPassword] = useState(false);
-  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
-  const [forgotLoading, setForgotLoading] = useState(false);
-  const [forgotNotice, setForgotNotice] = useState('');
-  const [forgotError, setForgotError] = useState('');
+  // Auto-detect approval status when officer email is provided
+  useEffect(() => {
+    if (activeMode !== 'login' || authorityDesk === 'main') {
+      setApprovalInfo(null);
+      return;
+    }
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@') || cleanEmail === 'iamgokulvanan@gmail.com') {
+      setApprovalInfo(null);
+      return;
+    }
+
+    // 1. Immediate local roster inspection
+    try {
+      const rawRoster = localStorage.getItem('urbannex_authority_approved_roster');
+      if (rawRoster) {
+        const list = JSON.parse(rawRoster);
+        const match = list.find((u: any) => u.email?.toLowerCase() === cleanEmail);
+        if (match) {
+          setApprovalInfo({ isApproved: true, department: match.department, badge: match.approvalBadge });
+          if (match.department && DEPARTMENTS.includes(match.department)) {
+            setDepartment(match.department);
+          }
+          return;
+        }
+      }
+      const rawReg = localStorage.getItem('urbannex_registered_authority');
+      if (rawReg) {
+        const reg = JSON.parse(rawReg);
+        if (reg?.email?.toLowerCase() === cleanEmail && (reg.approved === 1 || reg.approved === true)) {
+          setApprovalInfo({ isApproved: true, department: reg.department, badge: reg.approvalBadge });
+          if (reg.department && DEPARTMENTS.includes(reg.department)) {
+            setDepartment(reg.department);
+          }
+          return;
+        }
+      }
+    } catch {}
+
+    // 2. Query backend approval-status API
+    const timer = setTimeout(() => {
+      fetch(`/api/auth/approval-status?email=${encodeURIComponent(cleanEmail)}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data && data.approved) {
+            setApprovalInfo({ isApproved: true, department: data.department, badge: data.approvalBadge });
+            if (data.department && DEPARTMENTS.includes(data.department)) {
+              setDepartment(data.department);
+            }
+          } else {
+            setApprovalInfo(null);
+          }
+        })
+        .catch(() => {});
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [email, activeMode, authorityDesk]);
 
   const handleModeSwitch = (newMode: 'login' | 'signup') => {
     setActiveMode(newMode);
     if (onModeChange) onModeChange(newMode);
     setView('auth');
     if (newMode === 'login') {
-      if (authorityDesk === 'main') {
+      if (email && email.toLowerCase() !== 'iamgokulvanan@gmail.com') {
+        setAuthorityDesk('department');
+        setPassword('');
+      } else if (authorityDesk === 'main') {
         setEmail('iamgokulvanan@gmail.com');
         setPassword('gokul123@');
       } else {
@@ -88,7 +180,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }
     } else {
       setName('');
-      setEmail('');
       setPassword('');
     }
   };
@@ -98,9 +189,35 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     if (desk === 'main') {
       setEmail('iamgokulvanan@gmail.com');
       setPassword('gokul123@');
+      setApprovalInfo(null);
     } else {
-      setEmail('roads@urbannex.ai');
-      setPassword('roads123@');
+      // If user typed a custom email, preserve it!
+      if (email && email.toLowerCase() !== 'iamgokulvanan@gmail.com') {
+        // preserve current officer email
+      } else {
+        let storedEmail = '';
+        let storedDept: Department | null = null;
+        try {
+          const last = localStorage.getItem('urbannex_last_login_email');
+          if (last && last.toLowerCase() !== 'iamgokulvanan@gmail.com') storedEmail = last;
+          const regRaw = localStorage.getItem('urbannex_registered_authority');
+          if (regRaw) {
+            const reg = JSON.parse(regRaw);
+            if (reg?.email && reg.email.toLowerCase() !== 'iamgokulvanan@gmail.com') {
+              if (!storedEmail) storedEmail = reg.email;
+              if (reg.department && DEPARTMENTS.includes(reg.department)) storedDept = reg.department;
+            }
+          }
+        } catch {}
+        if (storedEmail) {
+          setEmail(storedEmail);
+          setPassword('');
+          if (storedDept) setDepartment(storedDept);
+        } else {
+          setEmail('roads@urbannex.ai');
+          setPassword('roads123@');
+        }
+      }
     }
   };
 
@@ -112,8 +229,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         email: email.trim(),
         password,
         accountType: authorityDesk,
-        department: authorityDesk === 'department' ? department : undefined,
+        department: authorityDesk === 'department' ? (approvalInfo?.department || department) : undefined,
         action: 'login',
+        approvalBadge: approvalInfo?.badge,
       });
     } else {
       onSubmit({
@@ -443,6 +561,19 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     Sign Up
                   </button>
                 </div>
+
+                {/* Official Approval Clearance Banner */}
+                {approvalInfo?.isApproved && activeMode === 'login' && authorityDesk === 'department' && (
+                  <div className="mb-4 rounded-2xl border-2 border-emerald-400 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 p-3.5 text-xs text-emerald-950 font-semibold shadow-xs animate-in fade-in duration-200">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span className="font-extrabold text-emerald-900 uppercase tracking-wide text-[11px]">Official Clearance Approved</span>
+                    </div>
+                    <p className="mt-1 text-[11px] text-emerald-800 font-medium">
+                      Main Branch has approved authority access for <strong>{approvalInfo.department || department}</strong>. Enter your password to enter the Command Center.
+                    </p>
+                  </div>
+                )}
 
                 {/* Form starts */}
                 <form onSubmit={handleSubmit} className="space-y-4">
