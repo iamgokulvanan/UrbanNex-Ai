@@ -58,6 +58,21 @@ class ResilientStore {
         this.nextUserId = (this.users.reduce((max: number, u: any) => Math.max(max, Number(u.id) || 0), 0) || 0) + 1;
         this.nextEventId = (this.realtime_events.reduce((max: number, e: any) => Math.max(max, Number(e.id) || 0), 0) || 0) + 1;
       }
+
+      if (!this.users.some(u => u.email?.toLowerCase() === 'iamgokulvanan@gmail.com')) {
+        this.users.unshift({
+          id: 1,
+          name: 'Main Branch Director (Gokulvanan)',
+          email: 'iamgokulvanan@gmail.com',
+          role: 'main',
+          department: null,
+          requested_department: null,
+          approved: 1,
+          password_hash: '6a11d64bc930fa23b9c2444d9bbfdfc894b8dffd653aaaa974461c2cf4f9bdc18bd32f0837db89a8bdcc5bfe64887cdf8a8152f29cdefc6a083f5404ee2d0544',
+          password_salt: 'f9e6fcfd7654d5fb4a9e6247f7100696',
+          created_at: new Date().toISOString(),
+        });
+      }
     } catch (err) {
       console.warn('[ResilientStore] Could not load state from disk:', err);
     }
@@ -84,29 +99,31 @@ class ResilientStore {
     if (cleanSql.startsWith('SELECT 1')) {
       return { 1: 1 };
     }
-    if (cleanSql.includes('FROM users') && (cleanSql.includes('OR id = ?') || cleanSql.includes('OR email = ?') || cleanSql.includes('OR LOWER(email) = ?'))) {
-      for (const p of params) {
-        if (typeof p === 'string' && p.includes('@')) {
-          const user = this.users.find(u => u.email.toLowerCase() === p.toLowerCase().trim());
-          if (user) return { ...user };
+    if (cleanSql.includes('FROM users')) {
+      if (cleanSql.includes('email')) {
+        for (const p of params) {
+          if (typeof p === 'string' && p.includes('@')) {
+            const em = p.toLowerCase().trim();
+            const user = this.users.find(u => u.email.toLowerCase() === em);
+            if (user) return { ...user };
+          }
         }
-        const num = Number(p);
-        if (!isNaN(num) && num > 0) {
-          const user = this.users.find(u => Number(u.id) === num);
+        const lastParam = String(params[params.length - 1] || params[0] || '').toLowerCase().trim();
+        if (lastParam && lastParam.includes('@')) {
+          const user = this.users.find(u => u.email.toLowerCase() === lastParam);
           if (user) return { ...user };
         }
       }
+      if (cleanSql.includes('id = ?') || cleanSql.includes('id=?') || cleanSql.includes('users.id = ?') || cleanSql.includes('OR id = ?')) {
+        for (const p of params) {
+          const num = Number(p);
+          if (!isNaN(num) && num > 0) {
+            const user = this.users.find(u => Number(u.id) === num);
+            if (user) return { ...user };
+          }
+        }
+      }
       return undefined;
-    }
-    if (cleanSql.includes('FROM users') && (cleanSql.includes('email = ?') || cleanSql.includes('LOWER(email) = ?'))) {
-      const email = String(params[params.length - 1] || params[0] || '').toLowerCase();
-      const user = this.users.find(u => u.email.toLowerCase() === email);
-      return user ? { ...user } : undefined;
-    }
-    if (cleanSql.includes('FROM users WHERE id = ?')) {
-      const id = Number(params[0]);
-      const user = this.users.find(u => Number(u.id) === id);
-      return user ? { ...user } : undefined;
     }
     if (cleanSql.includes('FROM sessions') && cleanSql.includes('users') && cleanSql.includes('sessions.token = ?')) {
       const token = String(params[0]);
