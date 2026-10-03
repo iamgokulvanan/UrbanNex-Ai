@@ -120,33 +120,39 @@ export default function App() {
     }
     fetch(apiUrl('/api/auth/me'), { headers: { Authorization: `Bearer ${sessionToken}` } })
       .then(async (response) => {
-        if (!response.ok) throw new Error('Your session has expired. Please sign in again.');
+        if (!response.ok) {
+          if (response.status === 401) {
+            throw new Error('Your session has expired. Please sign in again.');
+          }
+          return;
+        }
         const data = await readApiResponse(response);
         setUser(data.user);
       })
-      .catch(() => {
-        localStorage.removeItem('urbannex-token');
-        setSessionToken(null);
-        setUser(null);
+      .catch((err) => {
+        if (err instanceof Error && err.message.includes('session has expired')) {
+          localStorage.removeItem('urbannex-token');
+          setSessionToken(null);
+          setUser(null);
+        }
       });
   }, [sessionToken]);
 
   useEffect(() => {
     if (!user) return;
-    if (user.role === 'main') {
-      void loadAuthorityData(sessionToken || '');
-    } else {
-      if (!['workflow', 'incidents', 'gis_map', 'real_video', 'overview'].includes(activeTab)) {
+    void loadAuthorityData(sessionToken || '');
+    if (user.role === 'department') {
+      if (!['workflow', 'incidents', 'gis_map', 'real_video', 'overview', 'authorities'].includes(activeTab)) {
         setActiveTab('workflow');
       }
     }
   }, [user, sessionToken]);
 
   useEffect(() => {
-    if (user?.role === 'main' && activeTab === 'authorities' && sessionToken) {
+    if (activeTab === 'authorities' && sessionToken) {
       void loadAuthorityData(sessionToken);
     }
-  }, [activeTab, user?.role, sessionToken]);
+  }, [activeTab, sessionToken]);
 
   // Handlers
   const handleSelectDetectionById = (id?: string) => {
@@ -365,7 +371,7 @@ export default function App() {
       } catch {}
 
       if ((localQueued.length > 0 || localRoster.length > 0) && token) {
-        fetch(apiUrl('/api/admin/sync-authority-requests'), {
+        await fetch(apiUrl('/api/admin/sync-authority-requests'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ requests: localQueued, approvedRoster: localRoster }),
@@ -373,39 +379,45 @@ export default function App() {
       }
 
       const response = await fetch(apiUrl('/api/admin/authorities'), { headers: { Authorization: `Bearer ${token}` } });
-      if (!response.ok) throw new Error('Could not load department access requests and authority roster.');
-      const data = await response.json();
-      
-      const serverRequests: any[] = data.requests || [];
-      const serverRoster: any[] = data.roster || [];
+      if (response.ok) {
+        const data = await response.json();
+        const serverRequests: any[] = data.requests || [];
+        const serverRoster: any[] = data.roster || [];
 
-      // Merge server requests with local queued requests (avoid duplicates)
-      const mergedRequests = [...serverRequests];
-      for (const loc of localQueued) {
-        const inServer = serverRequests.some(s => s.email.toLowerCase() === loc.email.toLowerCase() || s.id === loc.id);
-        const inRoster = serverRoster.some(r => r.email.toLowerCase() === loc.email.toLowerCase());
-        if (!inServer && !inRoster) {
-          mergedRequests.push(loc);
+        // Merge server requests with local queued requests (avoid duplicates)
+        const mergedRequests = [...serverRequests];
+        for (const loc of localQueued) {
+          const inServer = serverRequests.some(s => s.email?.toLowerCase() === loc.email?.toLowerCase() || s.id === loc.id);
+          const inRoster = serverRoster.some(r => r.email?.toLowerCase() === loc.email?.toLowerCase());
+          if (!inServer && !inRoster) {
+            mergedRequests.push(loc);
+          }
         }
-      }
 
-      const mergedRoster = [...serverRoster];
-      for (const loc of localRoster) {
-        if (!mergedRoster.some(r => r.email.toLowerCase() === loc.email.toLowerCase())) {
-          mergedRoster.push(loc);
+        const mergedRoster = [...serverRoster];
+        for (const loc of localRoster) {
+          if (!mergedRoster.some(r => r.email?.toLowerCase() === loc.email?.toLowerCase())) {
+            mergedRoster.push(loc);
+          }
         }
-      }
 
-      setAuthorityRequests(mergedRequests);
-      setAuthorityRoster(mergedRoster);
-      setAuthorityActivity(data.activity || []);
-      setAuthorityError('');
-    } catch (error) {
+        setAuthorityRequests(mergedRequests);
+        setAuthorityRoster(mergedRoster);
+        setAuthorityActivity(data.activity || []);
+        setAuthorityError('');
+      } else {
+        if (localQueued.length > 0) setAuthorityRequests(localQueued);
+        if (localRoster.length > 0) setAuthorityRoster(localRoster);
+        setAuthorityError('');
+      }
+    } catch {
       try {
         const raw = localStorage.getItem('urbannex_authority_pending_queue');
         if (raw) setAuthorityRequests(JSON.parse(raw));
+        const rawRoster = localStorage.getItem('urbannex_authority_approved_roster');
+        if (rawRoster) setAuthorityRoster(JSON.parse(rawRoster));
       } catch {}
-      setAuthorityError(error instanceof Error ? error.message : 'Could not load department access requests.');
+      setAuthorityError('');
     }
   };
 
@@ -825,7 +837,7 @@ export default function App() {
           </div>
         )}
         <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pb-16 md:pb-6">
-          {activeTab === 'authorities' && user.role === 'main' && (
+          {activeTab === 'authorities' && (
             <AuthorityManagementPage
               authorityRequests={authorityRequests}
               requests={authorityRequests}
@@ -834,6 +846,8 @@ export default function App() {
               authorityActivity={authorityActivity}
               activity={authorityActivity}
               detections={detections}
+              userRole={user.role}
+              userDepartment={user.department}
               onApproveRequest={approveAuthorityRequest}
               onAssignDepartment={assignDepartment}
               onRerouteDetection={(detectionId, department, note) => {

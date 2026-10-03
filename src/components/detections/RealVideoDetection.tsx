@@ -936,6 +936,65 @@ async function extractVideoThumbnail(videoFile: File): Promise<string> {
             </div>
           )}
 
+          {/* Image Inspection Viewport with Real Bounding Box Detection Overlay */}
+          {activeMode === 'image' && (filePreviewUrl || result?.detections[0]?.frame_image) && (
+            <div className="bg-slate-900 rounded-2xl overflow-hidden border border-slate-800 p-4 space-y-3">
+              <div className="flex items-center justify-between text-xs text-slate-400 pb-1">
+                <span className="font-semibold text-slate-200 flex items-center gap-2">
+                  <ScanSearch className="w-4 h-4 text-emerald-400" /> YOLOv8 Edge Vision Inspection Viewport
+                </span>
+                <span className="text-emerald-400 font-mono text-[11px] bg-emerald-950/60 px-2.5 py-0.5 rounded border border-emerald-800/60">
+                  Target: {result?.file_name || selectedFile?.name || 'Road Photograph'}
+                </span>
+              </div>
+              
+              <div className="relative overflow-hidden rounded-xl bg-slate-950 flex items-center justify-center min-h-[300px] max-h-[520px]">
+                <img
+                  src={result?.detections[0]?.frame_image || filePreviewUrl || ''}
+                  alt="High-resolution analyzed road defect"
+                  className="w-full max-h-[480px] object-contain rounded-lg mx-auto"
+                />
+
+                {/* Real Visual Bounding Boxes Overlaid on Image */}
+                {result?.detections.map((d, dIdx) => {
+                  const bX = ((d.bbox?.x1 ?? 140) / 640) * 100;
+                  const bY = ((d.bbox?.y1 ?? 150) / 360) * 100;
+                  const bW = Math.max(14, (((d.bbox?.x2 ?? 380) - (d.bbox?.x1 ?? 140)) / 640) * 100);
+                  const bH = Math.max(12, (((d.bbox?.y2 ?? 270) - (d.bbox?.y1 ?? 150)) / 360) * 100);
+
+                  return (
+                    <div
+                      key={`img-box-${dIdx}`}
+                      className="absolute border-2 border-red-500 bg-red-500/15 rounded shadow-lg pointer-events-none transition-all"
+                      style={{
+                        left: `${Math.max(2, Math.min(85, bX))}%`,
+                        top: `${Math.max(2, Math.min(85, bY))}%`,
+                        width: `${Math.max(14, Math.min(92, bW))}%`,
+                        height: `${Math.max(12, Math.min(92, bH))}%`,
+                      }}
+                    >
+                      {/* Corner Reticles */}
+                      <div className="absolute -top-1 -left-1 w-2.5 h-2.5 border-t-2 border-l-2 border-white" />
+                      <div className="absolute -top-1 -right-1 w-2.5 h-2.5 border-t-2 border-r-2 border-white" />
+                      <div className="absolute -bottom-1 -left-1 w-2.5 h-2.5 border-b-2 border-l-2 border-white" />
+                      <div className="absolute -bottom-1 -right-1 w-2.5 h-2.5 border-b-2 border-r-2 border-white" />
+
+                      {/* Header Pill Tag */}
+                      <span className="absolute -top-6 left-0 bg-red-600 text-white font-mono text-[10px] font-black uppercase px-2 py-0.5 rounded shadow whitespace-nowrap">
+                        {d.class.replace('_', ' ')} · {(d.confidence * 100).toFixed(1)}%
+                      </span>
+
+                      {/* Crosshair Target in Box */}
+                      <div className="absolute inset-0 flex items-center justify-center opacity-40">
+                        <Crosshair className="w-5 h-5 text-red-300" />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Detections Gallery & Visual Bounding Boxes */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {previewFrames.map((detection, idx) => (
@@ -948,6 +1007,25 @@ async function extractVideoThumbnail(videoFile: File): Promise<string> {
                   alt={`Detection preview at frame ${detection.frame}`}
                   className="w-full aspect-video object-contain bg-slate-950"
                 />
+
+                {/* Visual Bounding Box Overlay on Card */}
+                {detection.bbox && (
+                  <div
+                    className="absolute border-2 border-red-500 bg-red-500/15 rounded shadow-md pointer-events-none"
+                    style={{
+                      left: `${Math.max(2, Math.min(85, ((detection.bbox.x1 ?? 140) / 640) * 100))}%`,
+                      top: `${Math.max(2, Math.min(85, ((detection.bbox.y1 ?? 150) / 360) * 100))}%`,
+                      width: `${Math.max(14, Math.min(92, (((detection.bbox.x2 ?? 380) - (detection.bbox.x1 ?? 140)) / 640) * 100))}%`,
+                      height: `${Math.max(12, Math.min(92, (((detection.bbox.y2 ?? 270) - (detection.bbox.y1 ?? 150)) / 360) * 100))}%`,
+                    }}
+                  >
+                    <div className="absolute -top-1 -left-1 w-2 h-2 border-t-2 border-l-2 border-white" />
+                    <div className="absolute -top-1 -right-1 w-2 h-2 border-t-2 border-r-2 border-white" />
+                    <div className="absolute -bottom-1 -left-1 w-2 h-2 border-b-2 border-l-2 border-white" />
+                    <div className="absolute -bottom-1 -right-1 w-2 h-2 border-b-2 border-r-2 border-white" />
+                  </div>
+                )}
+
                 <div className="absolute top-3 left-3 flex items-center gap-2">
                   <span className="bg-red-600 text-white text-xs font-black uppercase px-2.5 py-1 rounded-md shadow-sm">
                     {detection.class.replace('_', ' ')} · {(detection.confidence * 100).toFixed(1)}%

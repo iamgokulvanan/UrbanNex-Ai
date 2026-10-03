@@ -73,6 +73,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-red-100 text-red-700',
     },
     {
+      id: 'authorities' as NavTab,
+      label: 'Authority Access',
+      icon: UserRoundCog,
+      badge: 'Roster',
+      badgeColor: 'bg-indigo-100 text-indigo-700',
+    },
+    {
       id: 'gis_map' as NavTab,
       label: 'Live GIS Map',
       icon: MapPin,

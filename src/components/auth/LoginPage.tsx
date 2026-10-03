@@ -16,6 +16,12 @@ import {
 import { Department } from '../../types';
 import { DEPARTMENTS } from '../../data/seedData';
 
+const configuredBackendUrl = (import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
+const backendUrl = configuredBackendUrl || (import.meta.env.DEV ? 'http://localhost:3000' : window.location.origin);
+function authApiUrl(path: string) {
+  return `${backendUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 interface LoginPageProps {
   mode?: 'login' | 'signup';
   onModeChange?: (mode: 'login' | 'signup') => void;
@@ -145,8 +151,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     // 2. Query backend approval-status API
     const timer = setTimeout(() => {
-      fetch(`/api/auth/approval-status?email=${encodeURIComponent(cleanEmail)}`)
-        .then(res => res.json())
+      fetch(authApiUrl(`/api/auth/approval-status?email=${encodeURIComponent(cleanEmail)}`))
+        .then(res => {
+          if (!res.ok) return null;
+          return res.json();
+        })
         .then(data => {
           if (data && data.approved) {
             setApprovalInfo({ isApproved: true, department: data.department, badge: data.approvalBadge });
@@ -211,11 +220,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         } catch {}
         if (storedEmail) {
           setEmail(storedEmail);
-          setPassword('');
           if (storedDept) setDepartment(storedDept);
         } else {
           setEmail('roads@urbannex.ai');
-          setPassword('roads123@');
+          if (!password) setPassword('roads123@');
         }
       }
     }
@@ -561,19 +569,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     Sign Up
                   </button>
                 </div>
-
-                {/* Official Approval Clearance Banner */}
-                {approvalInfo?.isApproved && activeMode === 'login' && authorityDesk === 'department' && (
-                  <div className="mb-4 rounded-2xl border-2 border-emerald-400 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 p-3.5 text-xs text-emerald-950 font-semibold shadow-xs animate-in fade-in duration-200">
-                    <div className="flex items-center gap-2">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span className="font-extrabold text-emerald-900 uppercase tracking-wide text-[11px]">Official Clearance Approved</span>
-                    </div>
-                    <p className="mt-1 text-[11px] text-emerald-800 font-medium">
-                      Main Branch has approved authority access for <strong>{approvalInfo.department || department}</strong>. Enter your password to enter the Command Center.
-                    </p>
-                  </div>
-                )}
 
                 {/* Form starts */}
                 <form onSubmit={handleSubmit} className="space-y-4">
