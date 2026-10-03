@@ -203,7 +203,7 @@ export default function App() {
     const targetAction = action || (authMode === 'signup' ? 'signup' : 'login');
     const endpoint = `/api/auth/${targetAction}`;
 
-    // Resilience fallback: lookup client approved roster if available
+    // Resilience fallback: lookup client approved roster or registered authority profile if available
     let clientRosterUser: any = undefined;
     if (targetAction === 'login') {
       try {
@@ -211,6 +211,15 @@ export default function App() {
         if (raw) {
           const list = JSON.parse(raw);
           clientRosterUser = list.find((u: any) => u.email?.toLowerCase() === normalizedEmail);
+        }
+        if (!clientRosterUser) {
+          const rawReg = localStorage.getItem('urbannex_registered_authority');
+          if (rawReg) {
+            const reg = JSON.parse(rawReg);
+            if (reg.email?.toLowerCase() === normalizedEmail) {
+              clientRosterUser = reg;
+            }
+          }
         }
       } catch {}
     }
@@ -254,6 +263,11 @@ export default function App() {
           const filtered = existing.filter((r: any) => r.email.toLowerCase() !== newReq.email.toLowerCase());
           filtered.push(newReq);
           localStorage.setItem('urbannex_authority_pending_queue', JSON.stringify(filtered));
+          localStorage.setItem('urbannex_registered_authority', JSON.stringify({
+            ...newReq,
+            department: newReq.requestedDepartment || department || 'Roads & Infrastructure',
+            role: 'department',
+          }));
         } catch {}
 
         setAuthorityRequests(prev => {
