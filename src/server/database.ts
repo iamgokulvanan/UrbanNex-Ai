@@ -195,13 +195,14 @@ class ResilientStore {
         }));
     }
     if (cleanSql.includes('FROM realtime_events')) {
-      if (cleanSql.includes("event_type = 'auth:login'")) {
+      if (cleanSql.includes("event_type = 'auth:login'") || cleanSql.includes("event_type IN ('auth:login'") || cleanSql.includes("event_type IN")) {
         return this.realtime_events
-          .filter(e => e.event_type === 'auth:login')
+          .filter(e => ['auth:login', 'email:approval_dispatched', 'email:access_requested'].includes(e.event_type))
           .sort((a, b) => Number(b.id) - Number(a.id))
-          .slice(0, 20)
+          .slice(0, 30)
           .map(e => ({
             id: Number(e.id),
+            event_type: e.event_type,
             payload: typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload),
             created_at: e.created_at,
             createdAt: e.created_at,
@@ -270,9 +271,36 @@ class ResilientStore {
       changes = 1;
       lastInsertRowid = newUser.id;
       this.save();
-    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?")) {
-      const id = params[params.length - 1];
-      const user = this.users.find(u => Number(u.id) === Number(id));
+    } else if (cleanSql.includes("UPDATE users SET password_hash = ?, password_salt = ?")) {
+      let user: any = undefined;
+      // Search by email if present in params
+      for (const p of params.slice(2)) {
+        if (typeof p === 'string' && p.includes('@')) {
+          const em = p.toLowerCase().trim();
+          user = this.users.find(u => u.email.toLowerCase() === em);
+          if (user) break;
+        }
+      }
+      // If not found, search by numeric ID
+      if (!user) {
+        for (const p of params.slice(2)) {
+          const idNum = Number(p);
+          if (!isNaN(idNum) && idNum > 0) {
+            user = this.users.find(u => Number(u.id) === idNum);
+            if (user) break;
+          }
+        }
+      }
+      // Fallback: match by last param if numeric or email
+      if (!user && params.length >= 3) {
+        const last = params[params.length - 1];
+        if (typeof last === 'string' && last.includes('@')) {
+          user = this.users.find(u => u.email.toLowerCase() === last.toLowerCase().trim());
+        } else {
+          const num = Number(last);
+          if (!isNaN(num)) user = this.users.find(u => Number(u.id) === num);
+        }
+      }
       if (user) {
         user.password_hash = params[0];
         user.password_salt = params[1];
@@ -322,15 +350,6 @@ class ResilientStore {
           user.role = 'department';
         }
         user.approved = 1;
-        changes = 1;
-        this.save();
-      }
-    } else if (cleanSql.startsWith('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?')) {
-      const id = Number(params[2]);
-      const user = this.users.find(u => u.id === id);
-      if (user) {
-        user.password_hash = params[0];
-        user.password_salt = params[1];
         changes = 1;
         this.save();
       }

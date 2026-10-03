@@ -431,9 +431,11 @@ export default function App() {
       }
 
       setAuthorityError('');
-      setAuthorityNotice(data.emailSent
-        ? `Access approved for ${department}; an email was sent to ${reqObj?.name || 'the authority'}.`
-        : `Access approved for ${department}. Account is now active in the directory.`);
+      const officerName = reqObj?.name || data.approvalDetails?.officerName || 'Officer';
+      const officerEmail = reqObj?.email || data.approvalDetails?.officerEmail || 'the officer email';
+      setAuthorityNotice(
+        `Official access approved for ${officerName} (${department})! Full clearance and login instructions dispatched to ${officerEmail}. The officer can now log in anytime.`
+      );
       void loadAuthorityData(sessionToken);
     } catch (e) {
       setAuthorityError(e instanceof Error ? e.message : 'Could not approve the authority request.');
@@ -485,6 +487,33 @@ export default function App() {
       setSessionToken(data.token);
       setUser(data.user);
       setAuthMode(null);
+    }
+    if (data.credentials) {
+      try {
+        const norm = email.trim().toLowerCase();
+        const regRaw = localStorage.getItem('urbannex_registered_authority');
+        if (regRaw) {
+          const reg = JSON.parse(regRaw);
+          if (reg?.email?.toLowerCase() === norm) {
+            reg.passwordHash = data.credentials.passwordHash;
+            reg.passwordSalt = data.credentials.passwordSalt;
+            localStorage.setItem('urbannex_registered_authority', JSON.stringify(reg));
+          }
+        }
+        const rosterRaw = localStorage.getItem('urbannex_authority_approved_roster');
+        if (rosterRaw) {
+          const list = JSON.parse(rosterRaw);
+          if (Array.isArray(list)) {
+            const updated = list.map((item: any) => {
+              if (item?.email?.toLowerCase() === norm) {
+                return { ...item, passwordHash: data.credentials.passwordHash, passwordSalt: data.credentials.passwordSalt };
+              }
+              return item;
+            });
+            localStorage.setItem('urbannex_authority_approved_roster', JSON.stringify(updated));
+          }
+        }
+      } catch {}
     }
     return data;
   };

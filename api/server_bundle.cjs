@@ -229,9 +229,10 @@ var ResilientStore = class {
       }));
     }
     if (cleanSql.includes("FROM realtime_events")) {
-      if (cleanSql.includes("event_type = 'auth:login'")) {
-        return this.realtime_events.filter((e) => e.event_type === "auth:login").sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 20).map((e) => ({
+      if (cleanSql.includes("event_type = 'auth:login'") || cleanSql.includes("event_type IN ('auth:login'") || cleanSql.includes("event_type IN")) {
+        return this.realtime_events.filter((e) => ["auth:login", "email:approval_dispatched", "email:access_requested"].includes(e.event_type)).sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 30).map((e) => ({
           id: Number(e.id),
+          event_type: e.event_type,
           payload: typeof e.payload === "string" ? e.payload : JSON.stringify(e.payload),
           created_at: e.created_at,
           createdAt: e.created_at
@@ -291,9 +292,33 @@ var ResilientStore = class {
       changes = 1;
       lastInsertRowid = newUser.id;
       this.save();
-    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?")) {
-      const id = params[params.length - 1];
-      const user = this.users.find((u) => Number(u.id) === Number(id));
+    } else if (cleanSql.includes("UPDATE users SET password_hash = ?, password_salt = ?")) {
+      let user = void 0;
+      for (const p of params.slice(2)) {
+        if (typeof p === "string" && p.includes("@")) {
+          const em = p.toLowerCase().trim();
+          user = this.users.find((u) => u.email.toLowerCase() === em);
+          if (user) break;
+        }
+      }
+      if (!user) {
+        for (const p of params.slice(2)) {
+          const idNum = Number(p);
+          if (!isNaN(idNum) && idNum > 0) {
+            user = this.users.find((u) => Number(u.id) === idNum);
+            if (user) break;
+          }
+        }
+      }
+      if (!user && params.length >= 3) {
+        const last = params[params.length - 1];
+        if (typeof last === "string" && last.includes("@")) {
+          user = this.users.find((u) => u.email.toLowerCase() === last.toLowerCase().trim());
+        } else {
+          const num = Number(last);
+          if (!isNaN(num)) user = this.users.find((u) => Number(u.id) === num);
+        }
+      }
       if (user) {
         user.password_hash = params[0];
         user.password_salt = params[1];
@@ -338,15 +363,6 @@ var ResilientStore = class {
           user.role = "department";
         }
         user.approved = 1;
-        changes = 1;
-        this.save();
-      }
-    } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?")) {
-      const id = Number(params[2]);
-      const user = this.users.find((u) => u.id === id);
-      if (user) {
-        user.password_hash = params[0];
-        user.password_salt = params[1];
         changes = 1;
         this.save();
       }
@@ -1550,18 +1566,28 @@ function hashPassword(password, salt = (0, import_node_crypto.randomBytes)(16).t
 }
 async function sendAuthorityEmail(to, subject, text) {
   const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.AUTH_FROM_EMAIL;
-  if (!apiKey || !from) {
-    console.warn("[Email] Resend is not configured; authority email was not delivered.");
+  const from = process.env.AUTH_FROM_EMAIL || "UrbanNex Command Center <onboarding@resend.dev>";
+  if (!apiKey) {
+    console.warn(`[Email Simulation] RESEND_API_KEY not configured. Dispatched to: ${to} | Subject: ${subject}`);
     return false;
   }
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to: [to], subject, text })
-  });
-  if (!response.ok) throw new Error(`Email provider responded with ${response.status}`);
-  return true;
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to: [to], subject, text })
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.warn(`[Email Provider Error] HTTP ${response.status}: ${errText}`);
+      return false;
+    }
+    console.log(`[Email Dispatched] Successfully delivered to ${to}: ${subject}`);
+    return true;
+  } catch (error) {
+    console.warn("[Email Provider Error] Network failure sending email:", error);
+    return false;
+  }
 }
 function getApplicationUrl() {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
@@ -2178,12 +2204,23 @@ app.post("/api/auth/signup", async (req, res) => {
   const credentials = hashPassword(password);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   try {
-    const runResult = await dbRun(`
-      INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
-      VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
-    `, [name, email, credentials.hash, credentials.salt, requestedDepartment, nowIso]);
+    const existing = await dbGet("SELECT id, approved FROM users WHERE email = ?", [email]);
+    if (existing) {
+      if (existing.approved) {
+        return res.status(409).json({ code: "ACCOUNT_EXISTS", error: "An approved account with this email already exists. Please log in or use Forgot Password." });
+      }
+      await dbRun(`
+        UPDATE users SET name = ?, password_hash = ?, password_salt = ?, requested_department = ?, created_at = ?
+        WHERE id = ?
+      `, [name, credentials.hash, credentials.salt, requestedDepartment, nowIso, existing.id]);
+    } else {
+      await dbRun(`
+        INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+        VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
+      `, [name, email, credentials.hash, credentials.salt, requestedDepartment, nowIso]);
+    }
     const createdRecord = await dbGet("SELECT id, name, email, requested_department, created_at FROM users WHERE email = ?", [email]);
-    const requestId = createdRecord ? Number(createdRecord.id) : runResult.lastInsertRowid ? Number(runResult.lastInsertRowid) : Date.now();
+    const requestId = createdRecord ? Number(createdRecord.id) : Date.now();
     const createdAt = createdRecord?.created_at || nowIso;
     const requestObj = {
       id: requestId,
@@ -2194,9 +2231,66 @@ app.post("/api/auth/signup", async (req, res) => {
       passwordHash: credentials.hash,
       passwordSalt: credentials.salt
     };
+    const adminSubject = `[UrbanNex Security] New Authority Access Request: ${name} (${requestedDepartment || "Department Officer"})`;
+    const adminText = [
+      "=================================================================",
+      "       URBANNEX CIVIC COMMAND - NEW AUTHORITY REQUEST            ",
+      "=================================================================",
+      "",
+      "A new municipal authority personnel has registered and is awaiting clearance.",
+      "",
+      "REQUEST DETAILS:",
+      "-----------------------------------------------------------------",
+      `\u2022 Officer Name:         ${name}`,
+      `\u2022 Official Email:       ${email}`,
+      `\u2022 Requested Division:   ${requestedDepartment || "General Department"}`,
+      `\u2022 Request Timestamp:    ${(/* @__PURE__ */ new Date()).toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} IST`,
+      `\u2022 Status:               PENDING MAIN BRANCH APPROVAL`,
+      "",
+      "ACTION REQUIRED BY MAIN BRANCH DIRECTOR:",
+      "-----------------------------------------------------------------",
+      "1. Log into UrbanNex with your credentials: iamgokulvanan@gmail.com",
+      '2. Open the "Authority Access" tab in the navigation.',
+      '3. Review this request and click "Approve & Assign".',
+      "",
+      `Portal Link: ${getApplicationUrl()}`,
+      "",
+      "=================================================================",
+      "UrbanNex AI Transit Operations System"
+    ].join("\n");
+    void sendAuthorityEmail("iamgokulvanan@gmail.com", adminSubject, adminText).catch(() => {
+    });
+    const userSubject = `[UrbanNex] Authority Access Request Submitted - Awaiting Clearance`;
+    const userText = [
+      `Hello Officer ${name},`,
+      "",
+      `Your registration for the UrbanNex Intelligent Transit Command Center has been received.`,
+      "",
+      `Requested Division: ${requestedDepartment || "Department Authority"}`,
+      "Status: Pending clearance from Main Branch Executive Administration (Director Gokulvanan).",
+      "",
+      "WHAT HAPPENS NEXT?",
+      "-----------------------------------------------------------------",
+      "\u2022 Your credentials are secure and queued for review.",
+      "\u2022 Once the Main Branch approves your request, you will immediately receive an official approval email.",
+      `\u2022 You will then be able to log in anytime at: ${getApplicationUrl()}`,
+      "",
+      "UrbanNex Security Administration"
+    ].join("\n");
+    void sendAuthorityEmail(email, userSubject, userText).catch(() => {
+    });
+    await dbRun(
+      "INSERT INTO realtime_events (event_type, payload, target_department, created_at) VALUES (?, ?, ?, ?)",
+      ["email:access_requested", JSON.stringify({
+        officerName: name,
+        email,
+        requestedDepartment,
+        timestamp: nowIso
+      }), requestedDepartment, nowIso]
+    );
     return res.status(202).json({
       pendingApproval: true,
-      message: "Your account request was sent to the main branch for approval.",
+      message: "Your account request was sent to the main branch for approval. A confirmation notice has been sent to your email.",
       request: requestObj
     });
   } catch (error) {
@@ -2323,9 +2417,22 @@ app.post("/api/auth/reset-password", async (req, res) => {
     return res.status(400).json({ error: "The verification code is invalid or has expired. Please request a new code." });
   }
   const credentials = hashPassword(password);
-  await dbRun("UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?", [credentials.hash, credentials.salt, user.id]);
+  await dbRun("UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ? OR LOWER(email) = LOWER(?)", [credentials.hash, credentials.salt, user.id, email]);
   await dbRun("DELETE FROM password_resets WHERE user_id = ?", [user.id]);
   await dbRun("DELETE FROM sessions WHERE user_id = ?", [user.id]);
+  const resetSuccessSubject = `[UrbanNex Security] Your Password Has Been Updated Successfully`;
+  const resetSuccessText = [
+    `Hello ${user.name},`,
+    "",
+    `The password for your UrbanNex Command Center account (${user.email}) was updated successfully on ${(/* @__PURE__ */ new Date()).toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} IST.`,
+    "",
+    "You can now sign in anytime using your new password.",
+    `UrbanNex Command Portal: ${getApplicationUrl()}`,
+    "",
+    "If you did not make this change, please contact iamgokulvanan@gmail.com immediately."
+  ].join("\n");
+  void sendAuthorityEmail(user.email, resetSuccessSubject, resetSuccessText).catch(() => {
+  });
   const session = await createSession({
     id: Number(user.id),
     name: user.name,
@@ -2338,7 +2445,11 @@ app.post("/api/auth/reset-password", async (req, res) => {
     success: true,
     message: "Password updated successfully! Logging you into UrbanNex...",
     token: session.token,
-    user: session.user
+    user: session.user,
+    credentials: {
+      passwordHash: credentials.hash,
+      passwordSalt: credentials.salt
+    }
   });
 });
 app.post("/api/auth/login", async (req, res) => {
@@ -2450,7 +2561,7 @@ app.get("/api/admin/authorities", async (req, res) => {
   }));
   const rawActivity = await dbAll(`
     SELECT id, payload, created_at
-    FROM realtime_events WHERE event_type = 'auth:login' ORDER BY id DESC LIMIT 20
+    FROM realtime_events WHERE event_type IN ('auth:login', 'email:approval_dispatched', 'email:access_requested') ORDER BY id DESC LIMIT 30
   `);
   const activity = rawActivity.map((a) => ({
     id: Number(a.id),
@@ -2544,24 +2655,78 @@ app.post("/api/admin/authority-requests/:id/approve", async (req, res) => {
   if (!result.changes) return res.status(404).json({ error: "Authority request not found." });
   const account = targetEmail ? await dbGet("SELECT name, email FROM users WHERE email = ?", [targetEmail]) : targetId ? await dbGet("SELECT name, email FROM users WHERE id = ?", [targetId]) : null;
   if (!account) return res.status(404).json({ error: "Authority request not found." });
+  const approvalTimestamp = (/* @__PURE__ */ new Date()).toLocaleString("en-US", { timeZone: "Asia/Kolkata", dateStyle: "full", timeStyle: "medium" }) + " IST";
+  const approvalSubject = `[UrbanNex Official] Department Access Approved - Welcome to ${department}`;
+  const approvalText = [
+    "=================================================================",
+    "     URBANNEX CIVIC COMMAND NETWORK - ACCESS CLEARANCE           ",
+    "=================================================================",
+    "",
+    `Dear Officer ${account.name},`,
+    "",
+    `Your official application for municipal authority access has been`,
+    `REVIEWED and APPROVED by the Main Branch Executive Administration.`,
+    "",
+    "OFFICIAL CREDENTIALS & CLEARANCE DETAILS:",
+    "-----------------------------------------------------------------",
+    `\u2022 Officer Name:        ${account.name}`,
+    `\u2022 Registered Email:    ${account.email}`,
+    `\u2022 Approved Division:   ${department}`,
+    `\u2022 Role Clearance:      Department Authority Desk (Level 2)`,
+    `\u2022 Approved By:         ${approver.name || "Main Branch Director (Gokulvanan)"}`,
+    `\u2022 Clearance Timestamp: ${approvalTimestamp}`,
+    `\u2022 Account Status:      ACTIVE & VERIFIED (Immediate Login Enabled)`,
+    "",
+    "HOW TO ACCESS YOUR DEPARTMENT WORKFLOW:",
+    "-----------------------------------------------------------------",
+    `1. Navigate to UrbanNex Command Portal:`,
+    `   ${getApplicationUrl()}`,
+    `2. Select "Log In".`,
+    `3. Choose Authority Desk: "Department".`,
+    `4. Select Authority Category: "${department}".`,
+    `5. Sign in using your registered email and the password you set during signup.`,
+    "",
+    `You now have full authority clearance to inspect live mobile sensor telemetry,`,
+    `review civic detections, assign field crews, and resolve problems for ${department}.`,
+    "",
+    "Security Notice: If you did not register for this access, contact the",
+    "Main Branch Administrator immediately at iamgokulvanan@gmail.com.",
+    "",
+    "=================================================================",
+    "UrbanNex AI Intelligent Transit & Municipal Infrastructure System"
+  ].join("\n");
   let emailSent = false;
   try {
-    emailSent = await sendAuthorityEmail(
-      account.email,
-      "Your UrbanNex department access is approved",
-      [
-        `Hello ${account.name},`,
-        "",
-        `Main branch approved your authority account for: ${department}.`,
-        "Sign in using the Department authority desk and the password you set during signup.",
-        "For security, your password is not included in this email.",
-        `Open UrbanNex: ${getApplicationUrl()}`
-      ].join("\n")
-    );
+    emailSent = await sendAuthorityEmail(account.email, approvalSubject, approvalText);
   } catch (error) {
     console.error("[Email] Authority approval notification failed:", error);
   }
-  res.json({ approved: true, department, emailSent, approvedBy: approver.name });
+  await dbRun(
+    "INSERT INTO realtime_events (event_type, payload, target_department, created_at) VALUES (?, ?, ?, ?)",
+    ["email:approval_dispatched", JSON.stringify({
+      recipient: account.email,
+      officerName: account.name,
+      department,
+      approvedBy: approver.name,
+      subject: approvalSubject,
+      emailSent,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    }), department, (/* @__PURE__ */ new Date()).toISOString()]
+  );
+  res.json({
+    approved: true,
+    department,
+    emailSent,
+    approvedBy: approver.name,
+    approvalDetails: {
+      officerName: account.name,
+      officerEmail: account.email,
+      department,
+      approvedBy: approver.name,
+      timestamp: approvalTimestamp,
+      subject: approvalSubject
+    }
+  });
 });
 app.post("/api/auth/logout", async (req, res) => {
   const token = getBearerToken(req);

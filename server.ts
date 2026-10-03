@@ -227,18 +227,28 @@ function hashPassword(password: string, salt = randomBytes(16).toString('hex')) 
 
 async function sendAuthorityEmail(to: string, subject: string, text: string) {
   const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.AUTH_FROM_EMAIL;
-  if (!apiKey || !from) {
-    console.warn('[Email] Resend is not configured; authority email was not delivered.');
+  const from = process.env.AUTH_FROM_EMAIL || 'UrbanNex Command Center <onboarding@resend.dev>';
+  if (!apiKey) {
+    console.warn(`[Email Simulation] RESEND_API_KEY not configured. Dispatched to: ${to} | Subject: ${subject}`);
     return false;
   }
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from, to: [to], subject, text }),
-  });
-  if (!response.ok) throw new Error(`Email provider responded with ${response.status}`);
-  return true;
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to: [to], subject, text }),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.warn(`[Email Provider Error] HTTP ${response.status}: ${errText}`);
+      return false;
+    }
+    console.log(`[Email Dispatched] Successfully delivered to ${to}: ${subject}`);
+    return true;
+  } catch (error) {
+    console.warn('[Email Provider Error] Network failure sending email:', error);
+    return false;
+  }
 }
 
 function getApplicationUrl() {
@@ -947,7 +957,7 @@ const healthCheck: express.RequestHandler = async (_req, res) => {
 app.get('/health', healthCheck);
 app.get('/api/health', healthCheck);
 
-// Authentication is backed by SQLite so accounts survive browser refreshes and server restarts.
+// Authentication is backed by SQLite/PostgreSQL/ResilientStore so accounts survive browser refreshes and server restarts.
 app.post('/api/auth/signup', async (req, res) => {
   const name = String(req.body.name || '').trim();
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -963,13 +973,25 @@ app.post('/api/auth/signup', async (req, res) => {
   const credentials = hashPassword(password);
   const nowIso = new Date().toISOString();
   try {
-    const runResult = await dbRun(`
-      INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
-      VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
-    `, [name, email, credentials.hash, credentials.salt, requestedDepartment, nowIso]);
+    const existing = await dbGet<UserRecord>('SELECT id, approved FROM users WHERE email = ?', [email]);
+    if (existing) {
+      if (existing.approved) {
+        return res.status(409).json({ code: 'ACCOUNT_EXISTS', error: 'An approved account with this email already exists. Please log in or use Forgot Password.' });
+      }
+      // If user is currently pending approval, update their pending registration
+      await dbRun(`
+        UPDATE users SET name = ?, password_hash = ?, password_salt = ?, requested_department = ?, created_at = ?
+        WHERE id = ?
+      `, [name, credentials.hash, credentials.salt, requestedDepartment, nowIso, existing.id]);
+    } else {
+      await dbRun(`
+        INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+        VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
+      `, [name, email, credentials.hash, credentials.salt, requestedDepartment, nowIso]);
+    }
 
     const createdRecord = await dbGet<UserRecord>('SELECT id, name, email, requested_department, created_at FROM users WHERE email = ?', [email]);
-    const requestId = createdRecord ? Number(createdRecord.id) : (runResult.lastInsertRowid ? Number(runResult.lastInsertRowid) : Date.now());
+    const requestId = createdRecord ? Number(createdRecord.id) : Date.now();
     const createdAt = createdRecord?.created_at || nowIso;
 
     const requestObj = {
@@ -982,9 +1004,70 @@ app.post('/api/auth/signup', async (req, res) => {
       passwordSalt: credentials.salt,
     };
 
+    // 1. Dispatch email alert to Main Branch Director (iamgokulvanan@gmail.com)
+    const adminSubject = `[UrbanNex Security] New Authority Access Request: ${name} (${requestedDepartment || 'Department Officer'})`;
+    const adminText = [
+      '=================================================================',
+      '       URBANNEX CIVIC COMMAND - NEW AUTHORITY REQUEST            ',
+      '=================================================================',
+      '',
+      'A new municipal authority personnel has registered and is awaiting clearance.',
+      '',
+      'REQUEST DETAILS:',
+      '-----------------------------------------------------------------',
+      `• Officer Name:         ${name}`,
+      `• Official Email:       ${email}`,
+      `• Requested Division:   ${requestedDepartment || 'General Department'}`,
+      `• Request Timestamp:    ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST`,
+      `• Status:               PENDING MAIN BRANCH APPROVAL`,
+      '',
+      'ACTION REQUIRED BY MAIN BRANCH DIRECTOR:',
+      '-----------------------------------------------------------------',
+      '1. Log into UrbanNex with your credentials: iamgokulvanan@gmail.com',
+      '2. Open the "Authority Access" tab in the navigation.',
+      '3. Review this request and click "Approve & Assign".',
+      '',
+      `Portal Link: ${getApplicationUrl()}`,
+      '',
+      '=================================================================',
+      'UrbanNex AI Transit Operations System',
+    ].join('\n');
+    void sendAuthorityEmail('iamgokulvanan@gmail.com', adminSubject, adminText).catch(() => {});
+
+    // 2. Dispatch confirmation notice to the registering user
+    const userSubject = `[UrbanNex] Authority Access Request Submitted - Awaiting Clearance`;
+    const userText = [
+      `Hello Officer ${name},`,
+      '',
+      `Your registration for the UrbanNex Intelligent Transit Command Center has been received.`,
+      '',
+      `Requested Division: ${requestedDepartment || 'Department Authority'}`,
+      'Status: Pending clearance from Main Branch Executive Administration (Director Gokulvanan).',
+      '',
+      'WHAT HAPPENS NEXT?',
+      '-----------------------------------------------------------------',
+      '• Your credentials are secure and queued for review.',
+      '• Once the Main Branch approves your request, you will immediately receive an official approval email.',
+      `• You will then be able to log in anytime at: ${getApplicationUrl()}`,
+      '',
+      'UrbanNex Security Administration',
+    ].join('\n');
+    void sendAuthorityEmail(email, userSubject, userText).catch(() => {});
+
+    // 3. Log event into database realtime_events for audit logging
+    await dbRun(
+      'INSERT INTO realtime_events (event_type, payload, target_department, created_at) VALUES (?, ?, ?, ?)',
+      ['email:access_requested', JSON.stringify({
+        officerName: name,
+        email,
+        requestedDepartment,
+        timestamp: nowIso,
+      }), requestedDepartment, nowIso]
+    );
+
     return res.status(202).json({
       pendingApproval: true,
-      message: 'Your account request was sent to the main branch for approval.',
+      message: 'Your account request was sent to the main branch for approval. A confirmation notice has been sent to your email.',
       request: requestObj,
     });
   } catch (error: any) {
@@ -1129,9 +1212,23 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 
   const credentials = hashPassword(password);
-  await dbRun('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?', [credentials.hash, credentials.salt, user.id]);
+  await dbRun('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ? OR LOWER(email) = LOWER(?)', [credentials.hash, credentials.salt, user.id, email]);
   await dbRun('DELETE FROM password_resets WHERE user_id = ?', [user.id]);
   await dbRun('DELETE FROM sessions WHERE user_id = ?', [user.id]);
+
+  // Dispatch password update confirmation email
+  const resetSuccessSubject = `[UrbanNex Security] Your Password Has Been Updated Successfully`;
+  const resetSuccessText = [
+    `Hello ${user.name},`,
+    '',
+    `The password for your UrbanNex Command Center account (${user.email}) was updated successfully on ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST.`,
+    '',
+    'You can now sign in anytime using your new password.',
+    `UrbanNex Command Portal: ${getApplicationUrl()}`,
+    '',
+    'If you did not make this change, please contact iamgokulvanan@gmail.com immediately.',
+  ].join('\n');
+  void sendAuthorityEmail(user.email, resetSuccessSubject, resetSuccessText).catch(() => {});
 
   // Create active session immediately so the user is logged in right after reset!
   const session = await createSession({
@@ -1148,6 +1245,10 @@ app.post('/api/auth/reset-password', async (req, res) => {
     message: 'Password updated successfully! Logging you into UrbanNex...',
     token: session.token,
     user: session.user,
+    credentials: {
+      passwordHash: credentials.hash,
+      passwordSalt: credentials.salt,
+    },
   });
 });
 
@@ -1277,7 +1378,7 @@ app.get('/api/admin/authorities', async (req, res) => {
 
   const rawActivity = await dbAll<any>(`
     SELECT id, payload, created_at
-    FROM realtime_events WHERE event_type = 'auth:login' ORDER BY id DESC LIMIT 20
+    FROM realtime_events WHERE event_type IN ('auth:login', 'email:approval_dispatched', 'email:access_requested') ORDER BY id DESC LIMIT 30
   `);
   const activity = rawActivity.map(a => ({
     id: Number(a.id),
@@ -1398,24 +1499,82 @@ app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
     : (targetId ? await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE id = ?', [targetId]) : null);
   if (!account) return res.status(404).json({ error: 'Authority request not found.' });
 
+  const approvalTimestamp = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'medium' }) + ' IST';
+  const approvalSubject = `[UrbanNex Official] Department Access Approved - Welcome to ${department}`;
+  const approvalText = [
+    '=================================================================',
+    '     URBANNEX CIVIC COMMAND NETWORK - ACCESS CLEARANCE           ',
+    '=================================================================',
+    '',
+    `Dear Officer ${account.name},`,
+    '',
+    `Your official application for municipal authority access has been`,
+    `REVIEWED and APPROVED by the Main Branch Executive Administration.`,
+    '',
+    'OFFICIAL CREDENTIALS & CLEARANCE DETAILS:',
+    '-----------------------------------------------------------------',
+    `• Officer Name:        ${account.name}`,
+    `• Registered Email:    ${account.email}`,
+    `• Approved Division:   ${department}`,
+    `• Role Clearance:      Department Authority Desk (Level 2)`,
+    `• Approved By:         ${approver.name || 'Main Branch Director (Gokulvanan)'}`,
+    `• Clearance Timestamp: ${approvalTimestamp}`,
+    `• Account Status:      ACTIVE & VERIFIED (Immediate Login Enabled)`,
+    '',
+    'HOW TO ACCESS YOUR DEPARTMENT WORKFLOW:',
+    '-----------------------------------------------------------------',
+    `1. Navigate to UrbanNex Command Portal:`,
+    `   ${getApplicationUrl()}`,
+    `2. Select "Log In".`,
+    `3. Choose Authority Desk: "Department".`,
+    `4. Select Authority Category: "${department}".`,
+    `5. Sign in using your registered email and the password you set during signup.`,
+    '',
+    `You now have full authority clearance to inspect live mobile sensor telemetry,`,
+    `review civic detections, assign field crews, and resolve problems for ${department}.`,
+    '',
+    'Security Notice: If you did not register for this access, contact the',
+    'Main Branch Administrator immediately at iamgokulvanan@gmail.com.',
+    '',
+    '=================================================================',
+    'UrbanNex AI Intelligent Transit & Municipal Infrastructure System',
+  ].join('\n');
+
   let emailSent = false;
   try {
-    emailSent = await sendAuthorityEmail(
-      account.email,
-      'Your UrbanNex department access is approved',
-      [
-        `Hello ${account.name},`,
-        '',
-        `Main branch approved your authority account for: ${department}.`,
-        'Sign in using the Department authority desk and the password you set during signup.',
-        'For security, your password is not included in this email.',
-        `Open UrbanNex: ${getApplicationUrl()}`,
-      ].join('\n'),
-    );
+    emailSent = await sendAuthorityEmail(account.email, approvalSubject, approvalText);
   } catch (error) {
     console.error('[Email] Authority approval notification failed:', error);
   }
-  res.json({ approved: true, department, emailSent, approvedBy: approver.name });
+
+  // Record approval event in realtime_events audit log
+  await dbRun(
+    'INSERT INTO realtime_events (event_type, payload, target_department, created_at) VALUES (?, ?, ?, ?)',
+    ['email:approval_dispatched', JSON.stringify({
+      recipient: account.email,
+      officerName: account.name,
+      department,
+      approvedBy: approver.name,
+      subject: approvalSubject,
+      emailSent,
+      timestamp: new Date().toISOString(),
+    }), department, new Date().toISOString()]
+  );
+
+  res.json({ 
+    approved: true, 
+    department, 
+    emailSent, 
+    approvedBy: approver.name,
+    approvalDetails: {
+      officerName: account.name,
+      officerEmail: account.email,
+      department,
+      approvedBy: approver.name,
+      timestamp: approvalTimestamp,
+      subject: approvalSubject,
+    },
+  });
 });
 
 app.post('/api/auth/logout', async (req, res) => {

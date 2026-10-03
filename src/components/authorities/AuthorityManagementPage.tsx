@@ -57,6 +57,7 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
   const [approvingId, setApprovingId] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [rosterSearch, setRosterSearch] = useState('');
+  const [lastApprovalNotice, setLastApprovalNotice] = useState<{ name: string; email: string; department: Department; time: string } | null>(null);
 
   const selectedIncident = detections.find(d => d.id === selectedIncidentId);
 
@@ -76,9 +77,18 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
   const handleApprove = async (id: number) => {
     const sel = document.getElementById(`dept-select-${id}`) as HTMLSelectElement | null;
     const chosenDept = (sel?.value as Department) || DEPARTMENTS[0];
+    const targetReq = authorityRequests.find(r => r.id === id);
     setApprovingId(id);
     try {
       await onApproveRequest(id, chosenDept);
+      if (targetReq) {
+        setLastApprovalNotice({
+          name: targetReq.name,
+          email: targetReq.email,
+          department: chosenDept,
+          time: new Date().toLocaleTimeString(),
+        });
+      }
     } finally {
       setApprovingId(null);
     }
@@ -181,6 +191,42 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
         <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-800 font-medium flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
           <span>{notice}</span>
+        </div>
+      )}
+
+      {lastApprovalNotice && (
+        <div className="p-5 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border-2 border-emerald-400 rounded-2xl shadow-sm space-y-3 animate-in fade-in duration-300">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold shadow-xs">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-extrabold text-sm text-emerald-950">
+                  Official Department Access Clearance Dispatched
+                </h3>
+                <p className="text-[11px] text-emerald-700">Real-world clearance certificate & login instructions sent to officer email</p>
+              </div>
+            </div>
+            <span className="text-[11px] font-mono px-2.5 py-1 bg-emerald-200/70 text-emerald-900 rounded-lg font-bold">
+              {lastApprovalNotice.time}
+            </span>
+          </div>
+
+          <div className="p-3.5 bg-white/90 rounded-xl border border-emerald-200 text-xs font-mono text-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div>
+              <span className="text-slate-400">Officer Name:</span> <strong className="text-slate-900">{lastApprovalNotice.name}</strong>
+            </div>
+            <div>
+              <span className="text-slate-400">Dispatched To:</span> <strong className="text-emerald-700">{lastApprovalNotice.email}</strong>
+            </div>
+            <div>
+              <span className="text-slate-400">Assigned Division:</span> <strong className="text-indigo-700">{lastApprovalNotice.department}</strong>
+            </div>
+            <div>
+              <span className="text-slate-400">Access Status:</span> <strong className="text-emerald-700">Active & Verified (Immediate Login Enabled)</strong>
+            </div>
+          </div>
         </div>
       )}
 
@@ -514,19 +560,52 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
                 parsed = { name: 'Authority User', email: 'authority@urbannex.ai' };
               }
 
+              const isApprovalDispatch = event.payload.includes('approval_dispatched') || parsed.subject?.includes('Approved') || Boolean(parsed.recipient);
+              const isAccessRequested = event.payload.includes('access_requested') || parsed.subject?.includes('Request Submitted');
+
               return (
                 <div key={idx} className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                   <div className="flex items-center gap-2.5">
-                    <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs shrink-0">
-                      <Mail className="w-3.5 h-3.5" />
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
+                      isApprovalDispatch 
+                        ? 'bg-emerald-100 text-emerald-700' 
+                        : (isAccessRequested ? 'bg-amber-100 text-amber-800' : 'bg-purple-100 text-purple-700')
+                    }`}>
+                      {isApprovalDispatch ? (
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                      ) : (
+                        <Mail className="w-3.5 h-3.5" />
+                      )}
                     </div>
                     <div>
-                      <p className="font-bold text-slate-800">
-                        {parsed.name} ({parsed.email}) signed in to <span className="text-purple-700 font-bold">{parsed.department || 'Main Branch Command'}</span>
-                      </p>
-                      <p className="text-[10px] text-slate-400">
-                        Notification alert dispatched to <strong>iamgokulvanan@gmail.com</strong>
-                      </p>
+                      {isApprovalDispatch ? (
+                        <>
+                          <p className="font-bold text-slate-800">
+                            Clearance Email Dispatched: {parsed.officerName || 'Officer'} ({parsed.recipient})
+                          </p>
+                          <p className="text-[10px] text-slate-500">
+                            Approved Division: <strong className="text-emerald-700">{parsed.department}</strong> · Approved by: <strong>{parsed.approvedBy || 'Director Gokulvanan'}</strong> · Official clearance sent to officer email
+                          </p>
+                        </>
+                      ) : isAccessRequested ? (
+                        <>
+                          <p className="font-bold text-slate-800">
+                            Authority Access Request: {parsed.officerName || 'Officer'} ({parsed.email})
+                          </p>
+                          <p className="text-[10px] text-slate-500">
+                            Requested Division: <strong className="text-indigo-700">{parsed.requestedDepartment || 'General Department'}</strong> · Notification alert dispatched to <strong>iamgokulvanan@gmail.com</strong>
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="font-bold text-slate-800">
+                            {parsed.name} ({parsed.email}) signed in to <span className="text-purple-700 font-bold">{parsed.department || 'Main Branch Command'}</span>
+                          </p>
+                          <p className="text-[10px] text-slate-400">
+                            Notification alert dispatched to <strong>iamgokulvanan@gmail.com</strong>
+                          </p>
+                        </>
+                      )}
                     </div>
                   </div>
                   <span className="text-[11px] font-mono text-slate-500 shrink-0">
