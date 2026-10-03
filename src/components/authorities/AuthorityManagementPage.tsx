@@ -3,52 +3,60 @@ import {
   Building2, 
   Users, 
   CheckCircle2, 
-  Clock, 
   ShieldCheck, 
   AlertTriangle, 
   Send, 
-  ArrowRight, 
   Mail, 
   UserCheck, 
   Kanban, 
-  Sparkles, 
   RefreshCw, 
-  ExternalLink,
-  MapPin,
   Check,
-  Activity
+  Activity,
+  Search,
+  Calendar,
+  Clock
 } from 'lucide-react';
 import { Detection, Department } from '../../types';
 import { DEPARTMENTS } from '../../data/seedData';
 import { NavTab } from '../layout/Sidebar';
 
-interface AuthorityManagementPageProps {
-  detections: Detection[];
-  authorityRequests: Array<{ id: number; name: string; email: string; requestedDepartment: Department | null; createdAt: string }>;
-  authorityRoster: Array<{ id: number | string; name: string; email: string; role: string; department: Department | null; createdAt?: string }>;
-  authorityActivity: Array<{ id: number | string; payload: string; createdAt: string }>;
+export interface AuthorityManagementPageProps {
+  detections?: Detection[];
+  authorityRequests?: Array<{ id: number; name: string; email: string; requestedDepartment: Department | null; createdAt: string }>;
+  requests?: Array<{ id: number; name: string; email: string; requestedDepartment: Department | null; createdAt: string }>;
+  authorityRoster?: Array<{ id: number | string; name: string; email: string; role: string; department: Department | null; createdAt?: string }>;
+  roster?: Array<{ id: number | string; name: string; email: string; role: string; department: Department | null; createdAt?: string }>;
+  authorityActivity?: Array<{ id: number | string; payload: string; createdAt: string }>;
+  activity?: Array<{ id: number | string; payload: string; createdAt: string }>;
   onApproveRequest: (id: number, department: Department) => void | Promise<void>;
-  onAssignDepartment: (detectionId: string, department: Department, note?: string) => void | Promise<void>;
-  onNavigateTab: (tab: NavTab) => void;
+  onAssignDepartment?: (detectionId: string, department: Department, note?: string) => void | Promise<void>;
+  onRerouteDetection?: (detectionId: string, department: Department, note?: string) => void | Promise<void>;
+  onSelectDetection?: (detection: Detection) => void;
+  onNavigateTab?: (tab: NavTab) => void;
+  onRefresh?: () => void | Promise<void>;
   error?: string;
   notice?: string;
 }
 
-export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = ({
-  detections,
-  authorityRequests,
-  authorityRoster,
-  authorityActivity,
-  onApproveRequest,
-  onAssignDepartment,
-  onNavigateTab,
-  error,
-  notice,
-}) => {
+export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (props) => {
+  const detections = props.detections || [];
+  const authorityRequests = props.authorityRequests || props.requests || [];
+  const authorityRoster = props.authorityRoster || props.roster || [];
+  const authorityActivity = props.authorityActivity || props.activity || [];
+  const onApproveRequest = props.onApproveRequest;
+  const onAssignDepartment = props.onAssignDepartment || props.onRerouteDetection || (() => {});
+  const onNavigateTab = props.onNavigateTab || (() => {});
+  const onRefresh = props.onRefresh;
+  const error = props.error;
+  const notice = props.notice;
+
   const [selectedIncidentId, setSelectedIncidentId] = useState<string>(detections[0]?.id || '');
   const [targetDepartment, setTargetDepartment] = useState<Department>('Roads & Infrastructure');
   const [dispatchNote, setDispatchNote] = useState<string>('');
   const [dispatchSuccess, setDispatchSuccess] = useState<string>('');
+  const [approvingId, setApprovingId] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [rosterSearch, setRosterSearch] = useState('');
 
   const selectedIncident = detections.find(d => d.id === selectedIncidentId);
 
@@ -62,6 +70,27 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
       setTimeout(() => setDispatchSuccess(''), 4000);
     } catch {
       // Handled by parent error state
+    }
+  };
+
+  const handleApprove = async (id: number) => {
+    const sel = document.getElementById(`dept-select-${id}`) as HTMLSelectElement | null;
+    const chosenDept = (sel?.value as Department) || DEPARTMENTS[0];
+    setApprovingId(id);
+    try {
+      await onApproveRequest(id, chosenDept);
+    } finally {
+      setApprovingId(null);
+    }
+  };
+
+  const handleTriggerRefresh = async () => {
+    if (!onRefresh) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setTimeout(() => setRefreshing(false), 500);
     }
   };
 
@@ -94,6 +123,17 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
     },
   };
 
+  const filteredRoster = authorityRoster.filter(user => {
+    const term = rosterSearch.trim().toLowerCase();
+    if (!term) return true;
+    return (
+      user.name.toLowerCase().includes(term) ||
+      user.email.toLowerCase().includes(term) ||
+      (user.department && user.department.toLowerCase().includes(term)) ||
+      user.role.toLowerCase().includes(term)
+    );
+  });
+
   return (
     <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-200">
       
@@ -110,8 +150,21 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
         </div>
 
         <div className="flex items-center gap-3">
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={handleTriggerRefresh}
+              disabled={refreshing}
+              className="p-2.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-xl shadow-xs text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              title="Refresh authority roster and pending requests"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin text-blue-600' : ''}`} />
+              <span className="hidden sm:inline">Refresh Data</span>
+            </button>
+          )}
+
           <div className="p-3 bg-white border border-slate-200 rounded-xl shadow-xs text-xs font-semibold text-slate-600">
-            <span className="text-slate-400">Admin Email: </span>
+            <span className="text-slate-400">Main Branch Admin: </span>
             <span className="font-bold text-slate-900 font-mono">iamgokulvanan@gmail.com</span>
           </div>
         </div>
@@ -299,7 +352,7 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
 
         {authorityRequests.length === 0 ? (
           <div className="py-8 text-center text-xs text-slate-400 font-medium">
-            No department access requests waiting for review. All officers verified.
+            No department access requests waiting for review. All registered officers are verified.
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
@@ -308,11 +361,15 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <h3 className="font-bold text-sm text-slate-900">{request.name}</h3>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-mono">
                       ID #{request.id}
                     </span>
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                      <Clock className="w-3 h-3" />
+                      {request.createdAt ? new Date(request.createdAt).toLocaleDateString() : 'Recent'}
+                    </span>
                   </div>
-                  <p className="text-xs text-slate-500">{request.email}</p>
+                  <p className="text-xs text-slate-500 font-mono">{request.email}</p>
                   <p className="text-xs text-slate-600">
                     Requested Department: <strong className="text-indigo-700">{request.requestedDepartment || 'Not specified'}</strong>
                   </p>
@@ -330,13 +387,21 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
                   </select>
                   <button
                     type="button"
-                    onClick={() => {
-                      const sel = document.getElementById(`dept-select-${request.id}`) as HTMLSelectElement | null;
-                      if (sel) void onApproveRequest(request.id, sel.value as Department);
-                    }}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition cursor-pointer flex items-center gap-1.5"
+                    disabled={approvingId === request.id}
+                    onClick={() => handleApprove(request.id)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
                   >
-                    <Check className="w-3.5 h-3.5" /> Approve & Assign
+                    {approvingId === request.id ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Approving...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Approve & Assign</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -347,16 +412,28 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
 
       {/* Active Authority Directory / Roster */}
       <section className="bg-white border border-slate-200 rounded-2xl p-5 md:p-6 shadow-xs space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
           <div>
             <h2 className="text-base font-black text-slate-900 flex items-center gap-2">
               <Users className="w-4 h-4 text-indigo-600" /> Active Municipal Authority Directory
             </h2>
-            <p className="text-xs text-slate-500">Official registered personnel with active access to department problem workflows</p>
+            <p className="text-xs text-slate-500">Official registered personnel stored in the database with active access to department problem workflows</p>
           </div>
-          <span className="text-xs font-bold px-2.5 py-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full">
-            {authorityRoster.length} Active Accounts
-          </span>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                value={rosterSearch}
+                onChange={(e) => setRosterSearch(e.target.value)}
+                placeholder="Search authority roster..."
+                className="pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 w-48 sm:w-60"
+              />
+            </div>
+            <span className="text-xs font-bold px-2.5 py-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full shrink-0">
+              {authorityRoster.length} Stored Accounts
+            </span>
+          </div>
         </div>
 
         <div className="overflow-x-auto">
@@ -366,15 +443,16 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
                 <th className="py-3 px-3">Officer / Name</th>
                 <th className="py-3 px-3">Email Address</th>
                 <th className="py-3 px-3">Role / Authority Desk</th>
+                <th className="py-3 px-3">Registered / Joined</th>
                 <th className="py-3 px-3">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium">
-              {authorityRoster.map((user) => (
+              {filteredRoster.map((user) => (
                 <tr key={user.id} className="hover:bg-slate-50/50 transition">
                   <td className="py-3 px-3 font-bold text-slate-900 flex items-center gap-2">
-                    <span className="w-7 h-7 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center font-bold text-xs">
-                      {user.name.charAt(0)}
+                    <span className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-100 flex items-center justify-center font-bold text-xs">
+                      {user.name.charAt(0).toUpperCase()}
                     </span>
                     <span>{user.name}</span>
                   </td>
@@ -388,6 +466,9 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
                       {user.role === 'main' ? 'Main Branch Executive' : (user.department || 'Department Authority')}
                     </span>
                   </td>
+                  <td className="py-3 px-3 text-slate-500 font-mono text-[11px]">
+                    {user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'Active'}
+                  </td>
                   <td className="py-3 px-3">
                     <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                       <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Active & Verified
@@ -395,6 +476,13 @@ export const AuthorityManagementPage: React.FC<AuthorityManagementPageProps> = (
                   </td>
                 </tr>
               ))}
+              {filteredRoster.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-xs text-slate-400">
+                    No matching authority personnel found in directory.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

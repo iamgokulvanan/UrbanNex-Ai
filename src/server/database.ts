@@ -145,24 +145,11 @@ class ResilientStore {
         .filter(u => u.role === 'department' && u.department === dept && Boolean(u.approved))
         .map(u => ({ email: u.email }));
     }
-    if (cleanSql.includes("FROM users WHERE approved = TRUE") || cleanSql.includes("FROM users WHERE approved = 1")) {
-      return this.users
-        .filter(u => Boolean(u.approved))
-        .map(u => ({
-          id: u.id,
-          name: u.name,
-          email: u.email,
-          role: u.role,
-          department: u.department,
-          created_at: u.created_at,
-          createdAt: u.created_at,
-        }));
-    }
     if (cleanSql.includes("role = 'department'") && (cleanSql.includes("approved = 0") || cleanSql.includes("approved = FALSE"))) {
       return this.users
-        .filter(u => u.role === 'department' && !u.approved)
+        .filter(u => u.role === 'department' && (u.approved === 0 || u.approved === false || !u.approved))
         .map(u => ({
-          id: u.id,
+          id: Number(u.id),
           name: u.name,
           email: u.email,
           requested_department: u.requested_department,
@@ -171,7 +158,32 @@ class ResilientStore {
           createdAt: u.created_at,
         }));
     }
+    if (cleanSql.includes("FROM users WHERE approved = TRUE") || cleanSql.includes("FROM users WHERE approved = 1") || cleanSql.includes("(approved = TRUE OR approved = 1)")) {
+      return this.users
+        .filter(u => Boolean(u.approved))
+        .map(u => ({
+          id: Number(u.id),
+          name: u.name,
+          email: u.email,
+          role: u.role,
+          department: u.department,
+          created_at: u.created_at,
+          createdAt: u.created_at,
+        }));
+    }
     if (cleanSql.includes('FROM realtime_events')) {
+      if (cleanSql.includes("event_type = 'auth:login'")) {
+        return this.realtime_events
+          .filter(e => e.event_type === 'auth:login')
+          .sort((a, b) => Number(b.id) - Number(a.id))
+          .slice(0, 20)
+          .map(e => ({
+            id: Number(e.id),
+            payload: typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload),
+            created_at: e.created_at,
+            createdAt: e.created_at,
+          }));
+      }
       const afterId = Number(params[0] || 0);
       let limit = 100;
       let deptFilter: string | null = null;
@@ -195,12 +207,26 @@ class ResilientStore {
 
     if (cleanSql.startsWith('INSERT INTO users')) {
       const email = String(params[1] || '').toLowerCase();
-      const existingIndex = this.users.findIndex(u => u.email === email);
+      const existingIndex = this.users.findIndex(u => u.email.toLowerCase() === email);
       const isMain = cleanSql.includes("'main'") || params[4] === 'main';
-      const role = cleanSql.includes("'main'") ? 'main' : (cleanSql.includes("'department'") ? 'department' : (params[4] || 'department'));
-      const dept = params[5] !== undefined ? params[5] : (params[4] && params[4] !== 'main' && params[4] !== 'department' ? params[4] : null);
-      const reqDept = params[6] !== undefined ? params[6] : (params[4] && params[4] !== 'main' && params[4] !== 'department' ? params[4] : null);
-      const approved = cleanSql.includes('1, ?') || cleanSql.includes('TRUE, ?') || isMain || params[7] === 1 || params[7] === true;
+      const role = cleanSql.includes("'main'") ? 'main' : (cleanSql.includes("'department'") ? 'department' : String(params[4] || 'department'));
+
+      let dept: string | null = null;
+      let reqDept: string | null = null;
+      let approved = 0;
+
+      // Handle seeding queries: INSERT INTO users (..., approved, created_at) VALUES (?, ..., 1, ?)
+      if (cleanSql.includes("1, ?") || cleanSql.includes("1,?") || isMain) {
+        dept = params[5] ? String(params[5]) : null;
+        reqDept = params[6] ? String(params[6]) : null;
+        approved = 1;
+      } else {
+        // Signup query: INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+        dept = null;
+        reqDept = params[4] ? String(params[4]) : null;
+        approved = 0;
+      }
+
       const newUser = {
         id: existingIndex >= 0 ? this.users[existingIndex].id : this.nextUserId++,
         name: params[0],
@@ -208,9 +234,9 @@ class ResilientStore {
         password_hash: params[2],
         password_salt: params[3],
         role,
-        department: dept || null,
-        requested_department: reqDept || null,
-        approved: approved ? 1 : 0,
+        department: dept,
+        requested_department: reqDept,
+        approved,
         created_at: String(params[params.length - 1] || new Date().toISOString()),
       };
       if (existingIndex >= 0) {
@@ -223,7 +249,7 @@ class ResilientStore {
       this.save();
     } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?")) {
       const id = params[params.length - 1];
-      const user = this.users.find(u => u.id === id);
+      const user = this.users.find(u => Number(u.id) === Number(id));
       if (user) {
         user.password_hash = params[0];
         user.password_salt = params[1];
@@ -241,11 +267,12 @@ class ResilientStore {
         changes = 1;
         this.save();
       }
-    } else if (cleanSql.includes('UPDATE users SET department = ?, approved = TRUE') || cleanSql.includes('UPDATE users SET department = ?, approved = 1')) {
+    } else if (cleanSql.includes('UPDATE users SET department = ?')) {
+      const targetDept = String(params[0]);
       const id = Number(params[1]);
-      const user = this.users.find(u => u.id === id);
+      const user = this.users.find(u => Number(u.id) === id);
       if (user) {
-        user.department = params[0];
+        user.department = targetDept;
         user.approved = 1;
         changes = 1;
         this.save();

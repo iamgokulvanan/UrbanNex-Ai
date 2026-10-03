@@ -183,20 +183,9 @@ var ResilientStore = class {
       const dept = params[0];
       return this.users.filter((u) => u.role === "department" && u.department === dept && Boolean(u.approved)).map((u) => ({ email: u.email }));
     }
-    if (cleanSql.includes("FROM users WHERE approved = TRUE") || cleanSql.includes("FROM users WHERE approved = 1")) {
-      return this.users.filter((u) => Boolean(u.approved)).map((u) => ({
-        id: u.id,
-        name: u.name,
-        email: u.email,
-        role: u.role,
-        department: u.department,
-        created_at: u.created_at,
-        createdAt: u.created_at
-      }));
-    }
     if (cleanSql.includes("role = 'department'") && (cleanSql.includes("approved = 0") || cleanSql.includes("approved = FALSE"))) {
-      return this.users.filter((u) => u.role === "department" && !u.approved).map((u) => ({
-        id: u.id,
+      return this.users.filter((u) => u.role === "department" && (u.approved === 0 || u.approved === false || !u.approved)).map((u) => ({
+        id: Number(u.id),
         name: u.name,
         email: u.email,
         requested_department: u.requested_department,
@@ -205,7 +194,26 @@ var ResilientStore = class {
         createdAt: u.created_at
       }));
     }
+    if (cleanSql.includes("FROM users WHERE approved = TRUE") || cleanSql.includes("FROM users WHERE approved = 1") || cleanSql.includes("(approved = TRUE OR approved = 1)")) {
+      return this.users.filter((u) => Boolean(u.approved)).map((u) => ({
+        id: Number(u.id),
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        department: u.department,
+        created_at: u.created_at,
+        createdAt: u.created_at
+      }));
+    }
     if (cleanSql.includes("FROM realtime_events")) {
+      if (cleanSql.includes("event_type = 'auth:login'")) {
+        return this.realtime_events.filter((e) => e.event_type === "auth:login").sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 20).map((e) => ({
+          id: Number(e.id),
+          payload: typeof e.payload === "string" ? e.payload : JSON.stringify(e.payload),
+          created_at: e.created_at,
+          createdAt: e.created_at
+        }));
+      }
       const afterId = Number(params[0] || 0);
       let limit = 100;
       let deptFilter = null;
@@ -225,12 +233,21 @@ var ResilientStore = class {
     let lastInsertRowid = void 0;
     if (cleanSql.startsWith("INSERT INTO users")) {
       const email = String(params[1] || "").toLowerCase();
-      const existingIndex = this.users.findIndex((u) => u.email === email);
+      const existingIndex = this.users.findIndex((u) => u.email.toLowerCase() === email);
       const isMain = cleanSql.includes("'main'") || params[4] === "main";
-      const role = cleanSql.includes("'main'") ? "main" : cleanSql.includes("'department'") ? "department" : params[4] || "department";
-      const dept = params[5] !== void 0 ? params[5] : params[4] && params[4] !== "main" && params[4] !== "department" ? params[4] : null;
-      const reqDept = params[6] !== void 0 ? params[6] : params[4] && params[4] !== "main" && params[4] !== "department" ? params[4] : null;
-      const approved = cleanSql.includes("1, ?") || cleanSql.includes("TRUE, ?") || isMain || params[7] === 1 || params[7] === true;
+      const role = cleanSql.includes("'main'") ? "main" : cleanSql.includes("'department'") ? "department" : String(params[4] || "department");
+      let dept = null;
+      let reqDept = null;
+      let approved = 0;
+      if (cleanSql.includes("1, ?") || cleanSql.includes("1,?") || isMain) {
+        dept = params[5] ? String(params[5]) : null;
+        reqDept = params[6] ? String(params[6]) : null;
+        approved = 1;
+      } else {
+        dept = null;
+        reqDept = params[4] ? String(params[4]) : null;
+        approved = 0;
+      }
       const newUser = {
         id: existingIndex >= 0 ? this.users[existingIndex].id : this.nextUserId++,
         name: params[0],
@@ -238,9 +255,9 @@ var ResilientStore = class {
         password_hash: params[2],
         password_salt: params[3],
         role,
-        department: dept || null,
-        requested_department: reqDept || null,
-        approved: approved ? 1 : 0,
+        department: dept,
+        requested_department: reqDept,
+        approved,
         created_at: String(params[params.length - 1] || (/* @__PURE__ */ new Date()).toISOString())
       };
       if (existingIndex >= 0) {
@@ -253,7 +270,7 @@ var ResilientStore = class {
       this.save();
     } else if (cleanSql.startsWith("UPDATE users SET password_hash = ?, password_salt = ?")) {
       const id = params[params.length - 1];
-      const user = this.users.find((u) => u.id === id);
+      const user = this.users.find((u) => Number(u.id) === Number(id));
       if (user) {
         user.password_hash = params[0];
         user.password_salt = params[1];
@@ -271,11 +288,12 @@ var ResilientStore = class {
         changes = 1;
         this.save();
       }
-    } else if (cleanSql.includes("UPDATE users SET department = ?, approved = TRUE") || cleanSql.includes("UPDATE users SET department = ?, approved = 1")) {
+    } else if (cleanSql.includes("UPDATE users SET department = ?")) {
+      const targetDept = String(params[0]);
       const id = Number(params[1]);
-      const user = this.users.find((u) => u.id === id);
+      const user = this.users.find((u) => Number(u.id) === id);
       if (user) {
-        user.department = params[0];
+        user.department = targetDept;
         user.approved = 1;
         changes = 1;
         this.save();
@@ -2060,12 +2078,12 @@ app.post("/api/auth/signup", async (req, res) => {
   const credentials = hashPassword(password);
   try {
     await dbRun(`
-      INSERT INTO users (name, email, password_hash, password_salt, role, requested_department, approved, created_at)
-      VALUES (?, ?, ?, ?, 'department', ?, FALSE, ?)
+      INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+      VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
     `, [name, email, credentials.hash, credentials.salt, requestedDepartment, (/* @__PURE__ */ new Date()).toISOString()]);
     return res.status(202).json({ pendingApproval: true, message: "Your account request was sent to the main branch for approval." });
   } catch (error) {
-    if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+    if (error instanceof Error && (error.message.includes("UNIQUE") || error.message.includes("duplicate key")) || error?.code === "23505") {
       return res.status(409).json({ code: "ACCOUNT_EXISTS", error: "An account with this email already exists." });
     }
     console.error("[Auth] Signup failed:", error);
@@ -2233,26 +2251,53 @@ app.get("/api/auth/me", async (req, res) => {
 });
 app.get("/api/admin/authorities", async (req, res) => {
   if (!await requireMainBranch(req, res)) return;
-  const requests = await dbAll(`
-    SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
-    FROM users WHERE role = 'department' AND approved = FALSE ORDER BY created_at ASC
+  const rawRequests = await dbAll(`
+    SELECT id, name, email, requested_department, created_at
+    FROM users WHERE role = 'department' AND (approved = FALSE OR approved = 0) ORDER BY created_at ASC
   `);
-  const roster = await dbAll(`
-    SELECT id, name, email, role, department, created_at AS createdAt
-    FROM users WHERE approved = TRUE ORDER BY role DESC, department ASC, name ASC
+  const requests = rawRequests.map((r) => ({
+    id: Number(r.id),
+    name: r.name,
+    email: r.email,
+    requestedDepartment: r.requested_department || r.requesteddepartment || r.requestedDepartment || null,
+    createdAt: r.created_at || r.createdat || r.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+  }));
+  const rawRoster = await dbAll(`
+    SELECT id, name, email, role, department, created_at
+    FROM users WHERE (approved = TRUE OR approved = 1) ORDER BY role DESC, department ASC, name ASC
   `);
-  const activity = await dbAll(`
-    SELECT id, payload, created_at AS createdAt
+  const roster = rawRoster.map((r) => ({
+    id: Number(r.id),
+    name: r.name,
+    email: r.email,
+    role: r.role,
+    department: r.department,
+    createdAt: r.created_at || r.createdat || r.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+  }));
+  const rawActivity = await dbAll(`
+    SELECT id, payload, created_at
     FROM realtime_events WHERE event_type = 'auth:login' ORDER BY id DESC LIMIT 20
   `);
+  const activity = rawActivity.map((a) => ({
+    id: Number(a.id),
+    payload: typeof a.payload === "string" ? a.payload : JSON.stringify(a.payload),
+    createdAt: a.created_at || a.createdat || a.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+  }));
   res.json({ requests, roster, activity });
 });
 app.get("/api/admin/authority-requests", async (req, res) => {
   if (!await requireMainBranch(req, res)) return;
-  const requests = await dbAll(`
-    SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
-    FROM users WHERE role = 'department' AND approved = FALSE ORDER BY created_at ASC
+  const rawRequests = await dbAll(`
+    SELECT id, name, email, requested_department, created_at
+    FROM users WHERE role = 'department' AND (approved = FALSE OR approved = 0) ORDER BY created_at ASC
   `);
+  const requests = rawRequests.map((r) => ({
+    id: Number(r.id),
+    name: r.name,
+    email: r.email,
+    requestedDepartment: r.requested_department || r.requesteddepartment || r.requestedDepartment || null,
+    createdAt: r.created_at || r.createdat || r.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+  }));
   res.json({ requests });
 });
 app.post("/api/admin/authority-requests/:id/approve", async (req, res) => {
@@ -2262,12 +2307,13 @@ app.post("/api/admin/authority-requests/:id/approve", async (req, res) => {
   if (!DEPARTMENTS.includes(department)) {
     return res.status(400).json({ error: "Choose a valid department." });
   }
+  const targetId = Number(req.params.id);
   const result = await dbRun(`
-    UPDATE users SET department = ?, approved = TRUE
-    WHERE id = ? AND role = 'department' AND approved = FALSE
-  `, [department, Number(req.params.id)]);
+    UPDATE users SET department = ?, approved = 1
+    WHERE id = ? AND role = 'department'
+  `, [department, targetId]);
   if (!result.changes) return res.status(404).json({ error: "Authority request not found." });
-  const account = await dbGet("SELECT name, email FROM users WHERE id = ?", [Number(req.params.id)]);
+  const account = await dbGet("SELECT name, email FROM users WHERE id = ?", [targetId]);
   if (!account) return res.status(404).json({ error: "Authority request not found." });
   let emailSent = false;
   try {

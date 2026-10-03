@@ -142,6 +142,12 @@ export default function App() {
     }
   }, [user, sessionToken]);
 
+  useEffect(() => {
+    if (user?.role === 'main' && activeTab === 'authorities' && sessionToken) {
+      void loadAuthorityData(sessionToken);
+    }
+  }, [activeTab, user?.role, sessionToken]);
+
   // Handlers
   const handleSelectDetectionById = (id?: string) => {
     if (!id) return;
@@ -286,7 +292,7 @@ export default function App() {
       setAuthorityError('');
       setAuthorityNotice(data.emailSent
         ? `Access approved for ${department}; an email was sent to the authority.`
-        : `Access approved for ${department}; approval email was not sent. Configure RESEND_API_KEY and AUTH_FROM_EMAIL.`);
+        : `Access approved for ${department}. Account is now active in the directory.`);
       void loadAuthorityData(sessionToken);
     } catch (e) {
       setAuthorityError(e instanceof Error ? e.message : 'Could not approve the authority request.');
@@ -584,15 +590,21 @@ export default function App() {
         <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pb-16 md:pb-6">
           {activeTab === 'authorities' && user.role === 'main' && (
             <AuthorityManagementPage
-              roster={authorityRoster}
+              authorityRequests={authorityRequests}
               requests={authorityRequests}
+              authorityRoster={authorityRoster}
+              roster={authorityRoster}
+              authorityActivity={authorityActivity}
               activity={authorityActivity}
               detections={detections}
               onApproveRequest={approveAuthorityRequest}
+              onAssignDepartment={assignDepartment}
               onRerouteDetection={(detectionId, department, note) => {
                 assignDepartment(detectionId, department, note);
               }}
               onSelectDetection={setSelectedDetection}
+              onNavigateTab={setActiveTab}
+              onRefresh={() => sessionToken && loadAuthorityData(sessionToken)}
               notice={authorityNotice}
               error={authorityError}
             />

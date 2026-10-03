@@ -952,12 +952,15 @@ app.post('/api/auth/signup', async (req, res) => {
   const credentials = hashPassword(password);
   try {
     await dbRun(`
-      INSERT INTO users (name, email, password_hash, password_salt, role, requested_department, approved, created_at)
-      VALUES (?, ?, ?, ?, 'department', ?, FALSE, ?)
+      INSERT INTO users (name, email, password_hash, password_salt, role, department, requested_department, approved, created_at)
+      VALUES (?, ?, ?, ?, 'department', NULL, ?, 0, ?)
     `, [name, email, credentials.hash, credentials.salt, requestedDepartment, new Date().toISOString()]);
     return res.status(202).json({ pendingApproval: true, message: 'Your account request was sent to the main branch for approval.' });
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+  } catch (error: any) {
+    if (
+      (error instanceof Error && (error.message.includes('UNIQUE') || error.message.includes('duplicate key'))) ||
+      error?.code === '23505'
+    ) {
       return res.status(409).json({ code: 'ACCOUNT_EXISTS', error: 'An account with this email already exists.' });
     }
     console.error('[Auth] Signup failed:', error);
@@ -1134,27 +1137,57 @@ app.get('/api/auth/me', async (req, res) => {
 
 app.get('/api/admin/authorities', async (req, res) => {
   if (!await requireMainBranch(req, res)) return;
-  const requests = await dbAll(`
-    SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
-    FROM users WHERE role = 'department' AND approved = FALSE ORDER BY created_at ASC
+  const rawRequests = await dbAll<any>(`
+    SELECT id, name, email, requested_department, created_at
+    FROM users WHERE role = 'department' AND (approved = FALSE OR approved = 0) ORDER BY created_at ASC
   `);
-  const roster = await dbAll(`
-    SELECT id, name, email, role, department, created_at AS createdAt
-    FROM users WHERE approved = TRUE ORDER BY role DESC, department ASC, name ASC
+  const requests = rawRequests.map(r => ({
+    id: Number(r.id),
+    name: r.name,
+    email: r.email,
+    requestedDepartment: r.requested_department || r.requesteddepartment || r.requestedDepartment || null,
+    createdAt: r.created_at || r.createdat || r.createdAt || new Date().toISOString(),
+  }));
+
+  const rawRoster = await dbAll<any>(`
+    SELECT id, name, email, role, department, created_at
+    FROM users WHERE (approved = TRUE OR approved = 1) ORDER BY role DESC, department ASC, name ASC
   `);
-  const activity = await dbAll(`
-    SELECT id, payload, created_at AS createdAt
+  const roster = rawRoster.map(r => ({
+    id: Number(r.id),
+    name: r.name,
+    email: r.email,
+    role: r.role,
+    department: r.department,
+    createdAt: r.created_at || r.createdat || r.createdAt || new Date().toISOString(),
+  }));
+
+  const rawActivity = await dbAll<any>(`
+    SELECT id, payload, created_at
     FROM realtime_events WHERE event_type = 'auth:login' ORDER BY id DESC LIMIT 20
   `);
+  const activity = rawActivity.map(a => ({
+    id: Number(a.id),
+    payload: typeof a.payload === 'string' ? a.payload : JSON.stringify(a.payload),
+    createdAt: a.created_at || a.createdat || a.createdAt || new Date().toISOString(),
+  }));
+
   res.json({ requests, roster, activity });
 });
 
 app.get('/api/admin/authority-requests', async (req, res) => {
   if (!await requireMainBranch(req, res)) return;
-  const requests = await dbAll(`
-    SELECT id, name, email, requested_department AS requestedDepartment, created_at AS createdAt
-    FROM users WHERE role = 'department' AND approved = FALSE ORDER BY created_at ASC
+  const rawRequests = await dbAll<any>(`
+    SELECT id, name, email, requested_department, created_at
+    FROM users WHERE role = 'department' AND (approved = FALSE OR approved = 0) ORDER BY created_at ASC
   `);
+  const requests = rawRequests.map(r => ({
+    id: Number(r.id),
+    name: r.name,
+    email: r.email,
+    requestedDepartment: r.requested_department || r.requesteddepartment || r.requestedDepartment || null,
+    createdAt: r.created_at || r.createdat || r.createdAt || new Date().toISOString(),
+  }));
   res.json({ requests });
 });
 
@@ -1165,12 +1198,13 @@ app.post('/api/admin/authority-requests/:id/approve', async (req, res) => {
   if (!DEPARTMENTS.includes(department as Department)) {
     return res.status(400).json({ error: 'Choose a valid department.' });
   }
+  const targetId = Number(req.params.id);
   const result = await dbRun(`
-    UPDATE users SET department = ?, approved = TRUE
-    WHERE id = ? AND role = 'department' AND approved = FALSE
-  `, [department, Number(req.params.id)]);
+    UPDATE users SET department = ?, approved = 1
+    WHERE id = ? AND role = 'department'
+  `, [department, targetId]);
   if (!result.changes) return res.status(404).json({ error: 'Authority request not found.' });
-  const account = await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE id = ?', [Number(req.params.id)]);
+  const account = await dbGet<{ name: string; email: string }>('SELECT name, email FROM users WHERE id = ?', [targetId]);
   if (!account) return res.status(404).json({ error: 'Authority request not found.' });
   let emailSent = false;
   try {
