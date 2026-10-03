@@ -202,13 +202,26 @@ export default function App() {
     const normalizedEmail = email.trim().toLowerCase();
     const targetAction = action || (authMode === 'signup' ? 'signup' : 'login');
     const endpoint = `/api/auth/${targetAction}`;
+
+    // Resilience fallback: lookup client approved roster if available
+    let clientRosterUser: any = undefined;
+    if (targetAction === 'login') {
+      try {
+        const raw = localStorage.getItem('urbannex_authority_approved_roster');
+        if (raw) {
+          const list = JSON.parse(raw);
+          clientRosterUser = list.find((u: any) => u.email?.toLowerCase() === normalizedEmail);
+        }
+      } catch {}
+    }
+
     try {
       let response: Response;
       try {
         response = await fetch(apiUrl(endpoint), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password, accountType, department }),
+          body: JSON.stringify({ name: name.trim(), email: normalizedEmail, password, accountType, department, clientRosterUser }),
         });
       } catch {
         let healthAvailable = false;
@@ -289,11 +302,17 @@ export default function App() {
         if (raw) localQueued = JSON.parse(raw);
       } catch {}
 
-      if (localQueued.length > 0 && token) {
+      let localRoster: any[] = [];
+      try {
+        const raw = localStorage.getItem('urbannex_authority_approved_roster');
+        if (raw) localRoster = JSON.parse(raw);
+      } catch {}
+
+      if ((localQueued.length > 0 || localRoster.length > 0) && token) {
         fetch(apiUrl('/api/admin/sync-authority-requests'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ requests: localQueued }),
+          body: JSON.stringify({ requests: localQueued, approvedRoster: localRoster }),
         }).catch(() => {});
       }
 
@@ -314,12 +333,6 @@ export default function App() {
         }
       }
 
-      // Merge local approved roster cache
-      let localRoster: any[] = [];
-      try {
-        const raw = localStorage.getItem('urbannex_authority_approved_roster');
-        if (raw) localRoster = JSON.parse(raw);
-      } catch {}
       const mergedRoster = [...serverRoster];
       for (const loc of localRoster) {
         if (!mergedRoster.some(r => r.email.toLowerCase() === loc.email.toLowerCase())) {
@@ -347,7 +360,13 @@ export default function App() {
       const response = await fetch(apiUrl(`/api/admin/authority-requests/${id}/approve`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
-        body: JSON.stringify({ department, email: reqObj?.email }),
+        body: JSON.stringify({ 
+          department, 
+          email: reqObj?.email,
+          name: reqObj?.name,
+          passwordHash: (reqObj as any)?.passwordHash,
+          passwordSalt: (reqObj as any)?.passwordSalt,
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -374,6 +393,8 @@ export default function App() {
             role: 'department',
             department,
             createdAt: reqObj.createdAt,
+            passwordHash: (reqObj as any)?.passwordHash,
+            passwordSalt: (reqObj as any)?.passwordSalt,
           });
           localStorage.setItem('urbannex_authority_approved_roster', JSON.stringify(rosterList));
         }

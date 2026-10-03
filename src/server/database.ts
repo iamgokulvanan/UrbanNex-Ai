@@ -282,12 +282,37 @@ class ResilientStore {
         changes = 1;
         this.save();
       }
-    } else if (cleanSql.includes('UPDATE users SET department = ?')) {
+    } else if (cleanSql.includes('UPDATE users SET department = ?') || cleanSql.includes('UPDATE users SET approved = 1')) {
       const targetDept = String(params[0]);
-      const id = Number(params[1]);
-      const user = this.users.find(u => Number(u.id) === id);
+      let user: any = undefined;
+
+      // Check if any parameter contains an email address
+      for (const p of params.slice(1)) {
+        if (typeof p === 'string' && p.includes('@')) {
+          const em = p.toLowerCase().trim();
+          user = this.users.find(u => u.email.toLowerCase() === em);
+          if (user) break;
+        }
+      }
+
+      // If not found by email, check by numeric ID
+      if (!user) {
+        for (const p of params.slice(1)) {
+          const idNum = Number(p);
+          if (!isNaN(idNum) && idNum > 0) {
+            user = this.users.find(u => Number(u.id) === idNum);
+            if (user) break;
+          }
+        }
+      }
+
       if (user) {
-        user.department = targetDept;
+        if (cleanSql.includes('SET department = ?')) {
+          user.department = targetDept;
+        }
+        if (cleanSql.includes("role = 'department'") || user.role !== 'main') {
+          user.role = 'department';
+        }
         user.approved = 1;
         changes = 1;
         this.save();
